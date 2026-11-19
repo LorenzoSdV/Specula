@@ -14,7 +14,7 @@ Finish incremental trace validation only when all of the following hold.
 - Every `AffectedAction` is observed in a fresh trace or has a cited environment limitation.
 - Every selected high-risk Interaction Scenario has a fresh trace with the required producer/consumer/fault evidence.
 - Required identity and result fields are emitted and compared by active Trace predicates at source-faithful observation points, following [Validation 1's comparison rule](01-reuse-prior-harness.md#4-close-instrumentation-semantics).
-- Category B trace quality includes real overlap, contention, and per-thread order.
+- Trace quality includes real overlap and contention between requests (the coverage gate).
 
 Report coverage for the selected scenarios and observed effects, not exhaustive interaction coverage. Unobserved interactions and effects whose results were not compared remain explicit gaps; a bounded coverage limitation is distinct from an unresolved replay mismatch.
 

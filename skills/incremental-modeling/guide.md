@@ -34,7 +34,7 @@ Preserve correct system semantics rather than the old model's text. Prior valida
 
 Read and apply the relevant parts of the existing skills rather than restating them here:
 
-- For evidence, Scenario construction, exclusions, category-specific reasoning, and modeling granularity, read and apply the installed Specula **code-analysis** skill. Follow its category routing when the update changes or stresses distributed/concurrent boundaries.
+- For evidence, Scenario construction, exclusions, web-specific reasoning (the write matrix, isolation levels, the statements each entry point issues), and modeling granularity, read and apply the installed Specula **code-analysis** skill.
 - For code-faithful base/MC/Trace/instrumentation edits, source annotations, action splitting, and cfg coverage, read and apply the installed Specula **spec-generation** skill. Read its referenced generation documents for every artifact type touched by the update.
 - For reusing or modifying the prior harness and collecting fresh traces, read and apply only the relevant parts of the installed Specula **harness-generation** skill.
 - For running and debugging trace validation, follow the installed Specula **tla-trace-workflow** skill. Use [Validation 3's category-specific completion evidence](references/validation/03-trace-validation-loop.md#completion-evidence) in place of generic template requirements that assume every trace needs a temporal completion property.
@@ -89,7 +89,7 @@ Do not state either disposition, even as a placeholder, before the Chapter 1 dec
 For `MODEL_CHANGE_REQUIRED`, produce:
 
 - updated `modeling-brief.md` and `analysis-report.md` with evidence-backed update Scenarios;
-- complete updated `spec/base.tla`, `base.cfg`, `MC.tla`, MC/hunt cfgs, `Trace.tla`, `Trace.cfg`, `instrumentation-spec.md`, and `brief-coverage.md`;
+- complete updated `spec/base.tla`, `base.cfg`, `MC.tla`, MC/hunt cfgs, `Trace.tla`, `Trace.cfg.tmpl`, `instrumentation-spec.md`, and `brief-coverage.md` (with `WebDB.tla` and `WebTrace.tla` unchanged);
 - `spec/Update.tla` plus the update-specific cfgs needed for full-property, concrete-focused, open-focused, and discharge checking;
 - three-way source comments connecting changed code, changed reference locations, and the corresponding `Update.tla` focus.
 

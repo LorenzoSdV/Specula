@@ -1,42 +1,48 @@
 # Instrumentation Spec Format
 
-The instrumentation spec captures the mapping between TLA+ spec actions and source code locations. It serves as a "context handoff" — the spec generation agent's knowledge distilled into a document that an instrumentation agent (or human) can use to generate the actual code patches.
-
-> **Note**: Adapt to your target system. See `../examples/cometbft/instrumentation-spec.md` for a complete real-world example.
+The instrumentation spec says how each model action is recognized in a recording of the real app.
+The tracing stack captures everything at the app's boundaries (HTTP, SQL, committed rows), so this is
+an identification table, not a list of code patches. The harness phase turns it into the mapping file
+(`harness/mapping.toml`) that the trace builder reads.
 
 ## Document Structure
 
-The instrumentation spec has three sections:
+### Section 1: Modeled tables
 
-### Section 1: Trace Event Schema
+For each table: its key column and the modeled columns with their types (`int`, `text`, `bool`).
+These must match the row records in the model.
 
-Define the common event envelope and fields:
-- **Event envelope** — event name, node ID, state snapshot, message fields (if applicable)
-- **State fields** — mapping from implementation getter/field to TLA+ variable (captured at every event)
-- **Message fields** — mapping from implementation message fields to TLA+ message fields (event-specific)
+### Section 2: Routes
 
-### Section 2: Action-to-Code Mapping
+One entry per route in scope:
 
-One entry per spec action, each specifying:
-1. **Spec action name** — what the trace spec expects
-2. **Code location** — `file:line` where to insert instrumentation (list all locations if a spec action maps to multiple code paths)
-3. **Trigger point** — "before X" or "after Y" (state snapshot timing matters for pre/post-action correctness)
-4. **Trace event name** — the string used in trace JSON
-5. **Fields** — which state/message fields to capture for this event
-6. **Notes** — non-obvious details (e.g., self-vote handling, atomic vs non-atomic variant choice)
+| Action | Method and path | Inputs | Response fields |
+|---|---|---|---|
+| `Book` | `POST /seats/:seatId/book` | path `seatId` (int); header `authorization` (bearer) | `id` (int) |
 
-### Section 3: Special Considerations
+The trace has `<Action>_Begin` and `<Action>_End` events for it.
 
-Document implementation-specific details that affect instrumentation:
-- State that's hard to access for tracing (e.g., values in stable store that need shadow fields)
-- Concurrent threads/goroutines whose events may interleave
-- Bootstrap/initial state differences from the base spec
-- Serialization quirks (e.g., zero-value field omission)
+### Section 3: Statements
 
-## Principles
+One entry per step that is a SQL statement, in handler order:
 
-1. **Instrumentation must match spec granularity.** Every spec action needs exactly one trace event type; every trace event type must correspond to exactly one spec action. Read the base spec and trace spec to ensure 1:1 correspondence — mismatched granularity causes trace validation failures.
-2. **One entry per spec action.** List all code locations if a spec action maps to multiple places.
-3. **Trigger point precision matters.** Pre-action vs post-action snapshot timing determines correctness.
-4. **Document the non-obvious.** Edge cases in instrumentation cause most trace validation failures.
-5. **Match field names between trace and spec.** This document is the single source of truth for the mapping.
+| Action | Kind | Table | Statement shape | Code | Notes |
+|---|---|---|---|---|---|
+| `Book_ReadSeat` | select | Seat | `SELECT ... FROM "Seat" WHERE "id" = $1` | `routes/book.ts:L41` | `LIMIT 1` |
+| `Book_Hold` | write | Seat | `UPDATE "Seat" SET "held" = "held" + $1 WHERE ...` | `routes/book.ts:L47` | relative update |
+| `Book_Insert` | insert | Booking | `INSERT INTO "Booking" ...` | `routes/book.ts:L49` | unique `(seatId)` |
+
+- **Kind**: `select`, `write` (UPDATE, DELETE, SELECT ... FOR UPDATE: these can wait on locks),
+  `insert`, `begin`, `commit`, `rollback`. Steps of kind `write` and `insert` appear in traces as
+  `<Action>_start` and `<Action>_finish`.
+- **Statement shape**: the SQL text the app really sends (record one request of each kind through
+  the stack and read `pgproxy.ndjson`), enough to write a regular expression that matches only this
+  statement. When two routes send the same statement shape, say which route each step belongs to.
+- Note `LIMIT 1` (the result is any one matching row) and results without the key column (only the
+  row count can be checked).
+
+### Section 4: Special considerations
+
+In-process state that never reaches the database (an in-memory cache, an in-process lock) is the
+only thing boundary tracing cannot see. List it here, with the smallest code `emit()` that would
+record it, or explain why the model abstracts it away.

@@ -31,7 +31,7 @@ _LOCK_GUARD = threading.Lock()
 START_DESCRIPTION = (
     "Start TLC model checking or simulation in the background using Specula's resource-budgeted wrapper. "
     "Prefer this over starting java/tlc2.TLC in a shell. Returns a durable task ID, log paths, and waiting instructions. "
-    "Pass wrapper options as separate arguments: -m heap (default 50G), -M offheap (200G), -w workers (auto), "
+    "Pass wrapper options as separate arguments: -m heap and -M offheap (default 1/4 of physical memory each), -w workers (auto), "
     "-t minutes (180); choose memory/workers within the run budget. Simulation: -S -n traces -p depth. "
     "Other options: -d depth, -k checkpoint minutes, -D check deadlocks, -C continue on errors, -A cdot, "
     "-j JSON trace path, -f simulation trace prefix. Do not pass -s, -c, or -o; logs are unique per task."

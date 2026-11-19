@@ -16,13 +16,14 @@ Continue the normal Specula workflow from user-provided verification artifacts. 
 2. Read the installed **code-analysis** skill and use only its relevant Scenario-discovery guidance for a focused pass. Analyze only behaviors and interactions related to the supplied model. Do not repeat the full Phase 1 analysis or silently expand the model's scope.
 3. Write `modeling-brief.md` with enough behavioral and interface detail for the supplied scope and the focused Scenario supplement. Add linked companion documents named `modeling-brief-<topic>.md` beside the brief as needed. Record out-of-model Scenarios as coverage gaps rather than changing the supplied model during this phase.
 4. Copy usable specification artifacts into `spec/`. Read and follow the installed **spec-generation** skill only for missing Phase 2 responsibilities, including any required MC/Trace wrappers, configs, coverage audit, or instrumentation mapping. Preserve supplied implementations when they already satisfy those responsibilities.
-5. Finish with the ordinary Phase 2 output contract so the standard harness phase can consume the workspace.
+5. If no stack config was supplied, write `stack/stack.toml` and validate it as the installed **code-analysis** skill's Phase 5 describes (the harness phase needs a running, self-tested stack).
+6. Finish with the ordinary Phase 2 output contract so the standard harness phase can consume the workspace.
 
 ## Phase 2.5: Adopt and Complete the Harness
 
 1. Inspect supplied instrumentation, harness code, run commands, and traces before creating anything.
 2. Read and follow the installed **harness-generation** skill only for missing or unusable Phase 2.5 responsibilities. Prefer adapting supplied tooling over replacing it.
-3. If usable traces are already present, adopt them and proceed without rerunning the harness by default. Run the harness when needed to diagnose a problem, refresh missing evidence, or make the traces consumable.
+3. Supplied traces are adopted only if they pass the orchestrator's gate (recorded by this target's self-tested stack, rebuildable from the recordings with `harness/mapping.toml`, coverage gate passing). Otherwise record fresh traces with the runner from supplied or new workloads. Run the harness when needed to diagnose a problem, refresh missing evidence, or make the traces consumable.
 4. Fix instrumentation, harness, and trace-adaptation problems in the workspace when the normal harness workflow calls for it. Never change files at the original supplied path.
 5. Finish with the ordinary Phase 2.5 output contract so the standard validation workflow can start.
 

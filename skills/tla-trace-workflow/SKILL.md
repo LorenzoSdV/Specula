@@ -1,6 +1,6 @@
 ---
 name: tla-trace-workflow
-description: "TLA+ Trace Validation workflow. Use when: (1) validating if a trace matches a TLA+ spec, (2) debugging trace validation failures (TLC reports 'Temporal properties were violated' or validation stops unexpectedly), (3) fixing spec/trace inconsistencies after root cause is identified."
+description: "Trace validation of a web-app model against recorded traces. Use when: (1) checking whether recorded runs of the app match the TLA+ model, (2) diagnosing a rejected trace from the divergence report (stack, mapping or model), (3) fixing the mapping or the model after the root cause is identified."
 ---
 
 Read `guide.md` for the full workflow methodology.

@@ -1,197 +1,122 @@
-# Trace Spec Pattern
+# Trace Spec Pattern (WebTrace)
 
-Template and methodology for writing trace validation specs.
+The tracing stack records, at the app's boundaries: every HTTP request and response, every SQL
+statement with its result rows, error code and row count, and the rows each `COMMIT` committed
+(logical decoding). The trace builder turns one recording window into an NDJSON trace:
 
-> **Note**: Examples reference Raft (hashicorp/raft) as an illustrative case study. Adapt event names, state fields, and action wrappers to your target system.
+- line 1, the header: committed rows when the window starts (`tables`), the next value of each id
+  sequence (`seq`), the actors (`actors`), and the largest key (`maxkey`);
+- one event per model action, each with `actor`, `action`, `kind`, an interval `[lo, hi]` in which it
+  took effect, and its outcome fields (`args`, `rows`, `has_rows`, `limit1`, `count`, `err`,
+  `writes`, `status`, `resp`).
 
-> **Important**: There are two trace spec patterns depending on system category. The category should already be recorded in `modeling-brief.md`; do not wait until harness generation to decide it.
-> - **Category A (Distributed/Message-Passing)**: Single-file linear trace. Use the standard pattern below.
-> - **Category B (Concurrent/Lock-Free)**: Per-thread timebox trace. Use the timebox pattern at the end of this document.
+Events of one actor are in program order. Events of different actors are ordered only when their
+intervals do not overlap. `WebTrace.tla` encodes that partial order (`Ready`, `Consume`, `done`), so
+the trace spec only says how one event matches one step.
 
----
+## Files
 
-## Category A: Standard Trace Spec (Distributed Systems)
+- `Trace<App>.tla`: `EXTENDS <App>, WebTrace`. The matching logic below.
+- `Trace.tla`: `EXTENDS Trace<App>` (Specula's expected name).
+- `Trace.cfg.tmpl`: the config template, with `@TRACE@` (trace path) and `@CUT@` (number of events to
+  match) filled in by the toolkit's checker.
 
-## Purpose
-
-The trace spec drives TLC through a recorded execution trace from the real implementation, verifying that the base spec can reproduce every observed state transition.
-
-**The trace spec validates ALL base spec logic.** Do not skip or weaken action logic based on its predicted bug-finding value. Every action wrapper should call the full base spec action and validate the complete post-state. Skipping checks defeats the purpose of trace validation — finding where the spec and implementation disagree.
-
-## Structure
-
-1. **Trace loading** — `ndJsonDeserialize` from JSON file, filter by tag
-2. **Cursor variable** `l` — walks through trace events; `logline == TraceLog[l]`
-3. **Role/type mapping** — implementation strings to spec constants
-4. **Server extraction** — derive Server set from trace
-5. **Event predicates** — `IsEvent(name)`, `IsNodeEvent(name, i)`, `IsMsgEvent(name, from, to)`
-6. **Post-state validation** — verify spec state matches trace after each action
-7. **Action wrappers** — match event → call base action → validate → `l' = l + 1`
-8. **Silent actions** — fire base actions without consuming a trace event
-9. **TraceNext** — all wrappers + silent actions
-10. **TraceMatched** — temporal property checking entire trace was consumed
-
-## Silent Actions
-
-Silent actions handle impl state changes without trace events (e.g., leader noop append, concurrent timeouts). **Unconstrained silent actions cause state space explosion.** Always add preconditions:
-- Check `l <= Len(TraceLog)`
-- Match against the *next* trace event that would require this silent action
-- Restrict to specific nodes/states
-
-## Granularity Mismatch: One Trace Event, Multiple Spec Steps
-
-Sometimes the base spec models an operation as N sequential steps (each with its own PC state), but the trace can only observe the operation's start/end — not the intermediate steps.
-
-**Always instrument each step separately so the trace has N events.** This gives full precondition checking at every intermediate state. Do not skip steps or combine them — the intermediate states are where subtle bugs hide.
-
-If instrumenting individual steps is truly impossible (e.g., the code path is in an opaque library with no hook points), two weaker alternatives exist, but exhaust all instrumentation options first:
-
-- Use N-1 silent actions for intermediate steps, with only the boundary step consuming the trace event
-- Combine into a composite action, but document why each skipped precondition is not valuable to check
-
-## Post-State Validation (MANDATORY)
-
-Every trace action wrapper must include post-state field checks. `ValidatePostState == TRUE` is not acceptable — it disables state validation entirely, reducing trace validation to just action sequence feasibility.
-
-**Requirements**:
-- Every action wrapper must validate the **key fields** that the action modifies. Key fields are the spec variables that change as a result of this action (e.g., `currentTerm`, `role`, `commitIndex` for a Raft vote handler).
-- If the trace captures a field, validate it. Do not capture a field and then skip checking it.
-- If ValidatePostState checks a field, the harness must capture it. Do not write a check for a field that the harness never emits — this creates a conditional that is always vacuously true and provides no real validation.
-- If a field check causes validation failure, fix the root cause (spec bug, capture timing, mapping error). Do not remove the check to make validation pass, and do not remove the field from the harness to make the check vacuous.
-- For Category B systems, do not skip capturing a field because it is "racy" or "concurrently modified." The timebox approach (ViablePIDs) handles concurrent state — TLC searches for the interleaving where the captured value is consistent.
-
-**Strong validation**: check all key fields the action modifies — the default for most actions.
-
-**Weak validation**: check only a subset of fields — allowed only when the thread genuinely cannot access certain fields (e.g., braft replicator threads that lack access to commitIndex). Document the reason. Weak validation is a last resort, not a convenience.
-
-## Bootstrap State
-
-TraceInit must match the implementation's initial state, which may differ from the base spec's Init (e.g., initial term, bootstrap log entries).
-
-## Trace.cfg Must Include TraceMatched
-
-`Trace.cfg` must have `PROPERTIES TraceMatched` (uncommented). Without it, TLC reports "no errors" even when `l` never advances — trace validation becomes a false positive. Define `TraceMatched == <>(l > Len(TraceLog))` in `Trace.tla` and include `PROPERTIES TraceMatched` in `Trace.cfg`.
-
-## Common Issues
-
-| Issue | Solution |
-|-------|----------|
-| TraceMatched violated at line N | Event N cannot match any base spec action |
-| Deadlock at line N | No enabled action for event N |
-| TLC never finishes | Unconstrained silent action causing infinite branching |
-| State mismatch after action | Post-state validation failed — spec and impl disagree |
-| Message not found in bag | Already consumed by silent action or prior event |
-
-## Example
-
-See `../examples/cometbft/Trace.tla` for a complete trace spec with action wrappers, silent actions, bootstrap state, and strong/weak validation.
-
----
-
-## Category B: Timebox Trace Spec (Concurrent/Lock-Free Systems)
-
-For concurrent and lock-free data structures (DPDK ring, arc-swap, libomp, crossbeam-epoch) where operations are ns-level. Uses per-thread traces with `[start, end]` intervals instead of a single global trace sequence.
-
-### Key Differences from Category A
-
-| Aspect | Category A | Category B |
-|--------|-----------|-----------|
-| Trace variable | `l` (single cursor) | `pc` (per-thread cursor: `[Thread -> Nat]`) |
-| Logline access | `TraceLog[l]` | `traces[tid][pc[tid]]` |
-| Advance | `l' = l + 1` | `pc' = [pc EXCEPT ![tid] = pc[tid] + 1]` |
-| Event ordering | Fixed (file order) | Partial order (TLC searches via `ViablePIDs`) |
-| Completion check | `l > Len(TraceLog)` | `ThreadsWithEvents = {}` |
-| Trace format | Single NDJSON file | Preprocessed JSON with per-thread arrays |
-
-### Structure
-
-1. **Trace loading** — `JsonDeserialize` from preprocessed JSON (per-thread arrays with compressed timestamps)
-2. **Per-thread cursor** `pc` — `[Thread -> Nat]`, each thread's index into its trace
-3. **ThreadsWithEvents** — threads that still have unconsumed events
-4. **ViablePIDs** — partial order constraint: thread can step iff no other thread has a pending event that completed before this thread's next event started
-5. **Event matching** — `MatchEvent(tid, logline)`: dispatch by event name, validate state, call base action
-6. **Silent actions** — same as Category A, fire without advancing any `pc`
-7. **TraceNext** — `\E tid \in ViablePIDs : MatchEvent(...)` + silent actions + stuttering
-8. **TraceFullyConsumed** — temporal property `<>(ThreadsWithEvents = {})`
-
-### ViablePIDs (Core Concept)
+## Template
 
 ```tla
-ViablePIDs ==
-    { tid \in ThreadsWithEvents :
-        ~ \E tid2 \in ThreadsWithEvents :
-            /\ tid2 /= tid
-            /\ traces[tid2][pc[tid2]].end < traces[tid][pc[tid]].start }
-```
+EXTENDS Booking, WebTrace
 
-If thread A's pending event **ended before** thread B's next event **started**, then A must go first (B is not viable yet). If intervals overlap, both are viable — TLC explores both orderings.
+\* WebDB constants from the trace header (substituted in the cfg).
+TraceActors == {Header.actors[i] : i \in 1..Len(Header.actors)}
+TraceKeys == 1..Header.maxkey
+Strip(rec) == [c \in DOMAIN rec \ {"k"} |-> rec[c]]
+TraceInitRows ==
+    [tb \in AppTables |-> [k \in TraceKeys |->
+        LET rows == Header.tables[tb] IN
+        IF \E i \in 1..Len(rows) : rows[i].k = k
+        THEN Strip(rows[CHOOSE i \in 1..Len(rows) : rows[i].k = k]) ELSE Absent]]
 
-### State Validation
+Arg(e, f, d) == IF f \in DOMAIN e.args THEN e.args[f] ELSE d
+RouteOf(action) == CASE action = "Book_Begin" -> "Book" [] action = "GetSeat_Begin" -> "GetSeat"
+InputOf(e) == [route |-> RouteOf(e.action), token |-> Arg(e, "authorization", ""),
+               seatId |-> Arg(e, "seatId", 0)]
 
-State is still captured and validated (unlike pure OmniLink which drops state). State is captured **outside** the `[start, end]` interval to keep it tight. The captured state corresponds to the real execution ordering, so at least one TLC-explored interleaving will match.
+ModelRows(S) == {[c \in {"k"} \cup DOMAIN p[2] |-> IF c = "k" THEN p[1] ELSE p[2][c]] : p \in S}
+ObsRows(e) == {e.rows[i] : i \in 1..Len(e.rows)}
 
-State mismatches on non-real orderings cause those branches to die — this is pruning, not a problem.
+\* A statement's result equals the recorded one: rows, error code, affected-row count.
+ResultOK(r, e) ==
+    IF e.err # "" THEN ~res'[r].ok /\ res'[r].code = e.err
+    ELSE /\ res'[r].ok
+         /\ IF e.limit1
+            THEN /\ ObsRows(e) \subseteq ModelRows(res'[r].rows)
+                 /\ Cardinality(ObsRows(e)) = IF res'[r].rows = {} THEN 0 ELSE 1
+            ELSE e.has_rows => ObsRows(e) = ModelRows(res'[r].rows)
+         /\ e.kind = "write" => e.count = Cardinality(res'[r].rows)
 
-### TraceNext Pattern
+\* COMMIT: exactly the rows logical decoding recorded, with the same values.
+CommittedP(tb, k) == ver'[tb][k][Len(ver'[tb][k])][2]
+CommitOK(r, e) ==
+    /\ res'[r].ok
+    /\ {<<w.table, w.k>> : w \in {e.writes[i] : i \in 1..Len(e.writes)}}
+         = {p \in AppTables \X TraceKeys : Produces(wr[r][p[1]][p[2]])}
+    /\ \A i \in 1..Len(e.writes) :
+           LET w == e.writes[i] IN CommittedP(w.table, w.k) = IF w.present THEN Strip(w.row) ELSE Absent
 
-```tla
+StatementOK(r, e) ==
+    CASE e.kind = "commit"               -> CommitOK(r, e)
+      [] e.kind \in {"begin", "rollback"} -> res'[r].ok
+      [] e.phase = "start"               -> TRUE
+      [] OTHER                           -> ResultOK(r, e)
+
+MatchEvent(j) ==
+    LET e == Ev(j)  r == e.actor IN
+    \/ e.kind = "request" /\ Arrive(r, InputOf(e))
+    \/ e.kind = "response" /\ pc[r] = "respond" /\ rs[r].status = e.status /\ Respond(r)
+    \/ /\ e.kind \notin {"request", "response"}
+       /\ StepName(r) = e.action
+       /\ Step(r)
+       /\ StatementOK(r, e)
+
+Init == AppInit([tb \in AppTables |-> Header.seq[tb]]) /\ TraceInit
 TraceNext ==
-    \/ /\ ThreadsWithEvents /= {}
-       /\ \E tid \in ViablePIDs :
-            LET logline == traces[tid][pc[tid]] IN
-            /\ MatchEvent(tid, logline)
-            /\ pc' = [pc EXCEPT ![tid] = pc[tid] + 1]
-    \/ /\ ThreadsWithEvents /= {}
-       /\ SilentActions
-       /\ UNCHANGED pc
-    \/ /\ ThreadsWithEvents = {}
-       /\ UNCHANGED <<vars, pc>>
+    \/ \E j \in Ready : MatchEvent(j) /\ Consume(j)
+    \/ DBSilent /\ UNCHANGED <<appVars, done>>
+TraceSpec == Init /\ [][TraceNext]_<<vars, done>>
 ```
 
-### Do NOT Bypass Base Spec Actions
+```
+SPECIFICATION TraceSpec
+CONSTANTS
+    Txns <- TraceActors
+    Tables <- AppTables
+    Keys <- TraceKeys
+    UniqueCols <- AppUniqueCols
+    InitRows <- TraceInitRows
+    RowDomain <- AppRowDomain
+    AutoIso = "RC"
+    Absent = Absent
+    NoTxn = NoTxn
+    NoWrite = NoWrite
+    TracePath = "@TRACE@"
+    Cut @CUT@
+INVARIANT TraceNotDone
+CHECK_DEADLOCK FALSE
+```
 
-In Category B, TLC explores multiple interleavings. Some interleavings will cause a base spec action's precondition to fail (e.g., another thread modified shared state in this interleaving). This is **expected and correct** — those branches die, and TLC continues searching other interleavings.
+## Rules
 
-**Always call the base spec action directly.** The real execution ordering is always among the viable orderings (because real execution times fall within the recorded intervals). In the real ordering, the spec state matches what the thread observed, so the base spec action will succeed. TLC is guaranteed to find this path.
-
-Bypassing the base spec action (manually setting variables instead of calling the action) is **harmful**:
-- It skips the base spec's precondition checks, weakening validation
-- It allows dead branches to survive longer (dying at a later action instead of earlier), wasting TLC search time
-- It risks accepting invalid traces that violate the spec
-
-**Lesson from crossbeam-deque**: The initial implementation bypassed `StealBegin(tid)` with manual variable assignments. Review showed this was unnecessary — TLC's exhaustive search finds the correct interleaving where the base spec action succeeds. The bypass should be removed.
-
-### Invariant Selection for Trace Validation
-
-Not all MC invariants belong in Trace.cfg. Choose based on what trace validation can meaningfully check:
-
-| Include in Trace.cfg | Reason |
-|---|---|
-| **Safety invariants** (ConsumedWasPushed, NoDoublePop, AgreementSafety) | Core correctness — should hold on every real execution |
-| **Structural invariants** (DequeConsistency, CurrentBufferAlive, PushedDistinct) | Catches spec modeling errors early, before MC |
-
-| Exclude from Trace.cfg | Reason |
-|---|---|
-| **Fault-injection invariants** (NoUseAfterFree with prematureReclaim) | Only meaningful when fault injection is active; traces run without faults |
-| **Liveness/temporal properties** | Trace validation uses deadlock-based completion, not fairness |
-
-**Rule of thumb**: If an invariant can be violated by a correct execution (e.g., requires fault injection to trigger), don't check it during trace validation. If it should hold on every real execution, check it.
-
-### Search Space Control
-
-Timebox traces create branching at every overlapping interval pair. Control via:
-- **Tight intervals** (use `refine_op_start/end` around critical section)
-- **Short traces** (50-300 events per trace, run many traces)
-- **State validation** (prunes impossible orderings early)
-- **Timestamp compression** (preprocessor maps raw rdtsc to dense integers)
-
-### Example
-
-See `harness-generation` skill's `references/concurrent-timebox-guide.md` for the full Trace.tla template, preprocessor script, and instrumentation patterns.
-
-See `../examples/dpdk-ring/` for a complete Category B case study with ViablePIDs and validated traces.
-
-### Related Work
-
-- **OmniLink** (Hackett et al., 2026): Timebox + linearizability, no state capture
-- **CONVEROS** (Tang et al., ATC'25): Missing event markers, alternative for OS kernel modules
+- **Existential, not `TraceMatched`.** `INVARIANT TraceNotDone` is violated exactly when some
+  behavior matched `Cut` events; the checker reads that as ACCEPTED. Never add
+  `PROPERTIES TraceMatched`: it asks that *all* behaviors consume the trace, which concurrent traces
+  never satisfy.
+- **Check outcomes, not just the action sequence.** Every statement's rows, error code and row count,
+  every COMMIT's committed rows, every response's status (and the key response fields the mapping
+  records). A trace spec that only checks action names validates nothing about state.
+- **No extra silent actions.** The only unrecorded steps are WebDB's `DBSilent` (lock grants,
+  deadlock and serialization failures). Anything else the app does shows up as a recorded event; if
+  an event has no matching step, the model is missing it.
+- `InputOf` decodes exactly the arguments the mapping file records for each route: path groups, body
+  fields, headers (a header `idempotency-key` arrives as `idempotency_key`; a `bearer` header as
+  the token alone).
+- Absent values arrive as `-1` (int) and `""` (text): use the same defaults in the model's input record.

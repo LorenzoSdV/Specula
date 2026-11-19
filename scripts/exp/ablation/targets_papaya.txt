@@ -1,2 +1,0 @@
-# Papaya only
-papaya|ibraheemdev/papaya|Rust|Lock-Free Concurrent HashMap

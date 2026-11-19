@@ -5,7 +5,7 @@ Treat the previous harness as a validated CI asset, not scaffolding to regenerat
 ## 1. Establish Provenance
 
 - Confirm the prior harness, traces, source revision, build configuration, and validation changelog belong to the supplied old run.
-- Preserve the prior system category and trace strategy: Category A single-file traces or Category B per-thread timebox traces.
+- Preserve the prior trace strategy: boundary traces recorded through the tracing stack, built by the runner from `harness/mapping.toml`.
 - Read the current `instrumentation-spec.md`, `Trace.tla`, and update Scenarios before editing the harness.
 - Read and apply the relevant category-specific parts of the installed Specula **harness-generation** skill. Do not repeat its language templates here.
 
@@ -43,7 +43,7 @@ For each update Scenario, instrument the real code boundaries that expose:
 
 Cover every changed special/general call site rather than assuming one probe represents them all. Capture the fields that distinguish old behavior, new behavior, and competing unchanged branches. When the prior harness already provides all of this evidence, retain it instead of adding duplicate events.
 
-“More instrumentation” means more semantic observation points around the update, not logging every changed line. Avoid unrelated probes and probe effects. For Category B, keep intervals tight and the hot path lock-free; prefer a few precise per-thread timebox events over shared logging that serializes the race.
+“More instrumentation” means more mapped routes and statements, or more workloads that reach the update, not code changes. Only in-process state that never reaches the database needs an `emit()`; record it as a gap if it is not added.
 
 ## 4. Close Instrumentation Semantics
 

@@ -1,157 +1,108 @@
-# TLA+ Trace Validation Workflow
+# Trace Validation Workflow (Web Apps)
 
-Validate implementation traces against TLA+ specifications. Diagnose and fix validation failures through layered debugging.
+Check recorded runs of the real app against the TLA+ model. Diagnose rejected traces, then fix the
+mapping or the model.
 
 ## Input / Output
 
-**Input**: Trace spec (`Trace.tla` + `Trace.cfg`) + trace file (`.ndjson`) + base spec
+**Input**: `spec/Trace.tla` + `spec/Trace.cfg.tmpl`, the model, `traces/*.ndjson` (recorded by the
+harness phase), `harness/mapping.toml`, and the web toolkit (path in the prompt's web section).
 
-**Output**: Validated spec (trace passes) or corrected spec
+**Output**: every trace ACCEPTED, or a fixed mapping / model.
 
 **By default, execute autonomously.** Only pause for user confirmation if the prompt explicitly requests human-in-the-loop.
 
 ---
 
-## System Category
+## Core Concepts
 
-Before debugging, determine which trace pattern is in use:
-
-- **Category A (Distributed)**: Single-file trace, cursor variable `l`, linear matching. This is the standard case described below.
-- **Category B (Concurrent/Lock-Free)**: Per-thread traces, cursor variable `pc` (per-thread), `ViablePIDs` partial-order search. See note at the end of each phase for Category B differences.
-
-Determine the category from `modeling-brief.md`, `instrumentation-spec.md`, and the trace file layout. Do **not** assume Category A just because the workflow historically focused on distributed systems. Category B applies to DPDK, arc-swap, libomp, crossbeam-epoch, papaya, and similar ns-level concurrent systems. See `harness-generation` skill's `guide.md` Step 0 for classification.
-
----
-
-## Core Concepts (MUST REMEMBER)
-
-### Variable `l` Semantics (Category A)
-
-`l = N` means "currently validating TraceLog[N]", NOT "already validated N lines". TraceLog is 1-indexed.
-
-**Category B equivalent**: `pc[tid] = N` means "thread `tid` is about to process its Nth event". There is no single global cursor.
-
-### TLCGet("level") vs `l`
-
-**ALWAYS use `TLCGet("level")` in breakpoint conditions, NOT `l`.** `l` only works in the Trace wrapper spec; `TLCGet("level")` works everywhere including the base spec. This applies to both Category A and B.
-
-### Breakpoint Hit Semantics
-
-A breakpoint hit means TLC is **attempting** to evaluate that line — it does NOT mean the condition is TRUE. To know if a condition is TRUE, you must inspect variable values.
-
-### Conjunction Short-Circuit Evaluation
-
-TLC evaluates `/\` conditions top to bottom. If a condition is FALSE, subsequent conditions are not evaluated. Decreasing hit counts indicate filtering.
-
-### Category B: Multiple Branches per Step
-
-In Category B, TLC may explore multiple thread choices at each step (`\E tid \in ViablePIDs`). A single TLC level may have multiple branches. Hit counts will be higher than Category A because TLC tries every viable thread. This is normal — branches that fail preconditions or state validation are pruned automatically.
+- **Traces are partial orders.** Events of one request are in program order. Events of different
+  requests are ordered only when their time intervals do not overlap (`WebTrace.tla`).
+- **Validation is existential.** A trace is valid when *some* behavior of the model matches every
+  event, in an order the partial order allows, with every recorded outcome (rows, error codes, row
+  counts, committed rows, response statuses). The config uses `INVARIANT TraceNotDone`: TLC reporting
+  it violated means the trace matched. **Never** use `PROPERTIES TraceMatched` (it demands that every
+  behavior consume the trace, which no concurrent trace satisfies) or the MCP trace-validation tools
+  built on it.
+- **A rejection has a precise location.** The checker finds the largest number of events any
+  behavior matches and lists the events that were ready next but matched by no behavior.
 
 ---
 
-## Phase 1: Validation
+## Phase 1: Validate
 
-**Goal**: Determine if trace matches spec.
+    python3 <toolkit>/tracecheck/check.py --spec spec/Trace.tla --template spec/Trace.cfg.tmpl \
+        --jobs 4 traces/
 
-**Tool**: `run_trace_validation`
-
-**Prerequisites** (check before running validation):
-1. `Trace.cfg` has `PROPERTIES TraceMatched` (uncommented). Without this, TLC reports "no errors" even when the trace is never consumed — a false positive.
-2. `ValidatePostState` in `Trace.tla` is NOT a stub (`TRUE`). If it is, trace validation only checks action sequence feasibility without verifying state — this is insufficient. Go back and implement real field checks before proceeding. Every action wrapper should validate the key fields that the action modifies.
-
-Three outcomes:
-- `success` — trace is valid, done
-- `trace_mismatch` — go to Phase 2
-- `error` — check syntax with `validate_spec_syntax`
-
-Key fields for `trace_mismatch`: `failed_trace_line` (which trace line failed), `last_state_number` (use for breakpoint condition), `suggestion` (ready-to-use debugging hint).
-
-**Read `references/validation.md`** for detailed guidance.
+`ACCEPTED`, `REJECTED` (with "matches at most N/M events; could not match next: #j actor action"),
+or `ERROR` (TLC output: a parse or semantic error in the spec). Run all traces after every change.
 
 ---
 
-## Phase 2: Debugging
+## Phase 2: Diagnose a rejection
 
-**Goal**: Locate the exact condition that failed.
+Rerun the rejected trace with `--explain`:
 
-**Tool**: `run_trace_debugging`
+    python3 <toolkit>/tracecheck/check.py --spec spec/Trace.tla --template spec/Trace.cfg.tmpl \
+        --explain traces/<name>.ndjson
 
-**Methodology: Layered Debugging (Coarse -> Fine)**
+It prints, for each stuck event, what was recorded (kind, rows, error code, row count, status,
+committed writes) and the model's full state after the matched prefix (`pc`, `res`, `ver`, locks,
+locals). Compare them:
 
-1. **Coarse-grained localization**: Set breakpoints at major branches to identify which code path is relevant
-2. **Fine-grained localization**: Set breakpoints at each condition in the relevant branch
-3. **Variable inspection**: Use `evaluate` or `collect_variables` to understand WHY a condition failed
-
-Key patterns:
-- Decreasing hit counts show short-circuit filtering
-- First line with 0 hits is where failure occurs
-- If last hit is an action call, the action failed internally -> debug inside that action
-
-**Read `references/debugging.md`** for detailed methodology.
-
----
-
-## Phase 3: Fix
-
-**Goal**: Fix the spec or trace to resolve inconsistency.
-
-**First, classify the error type:**
-
-| Error Type | Description | Action |
-|------------|-------------|--------|
-| **Inconsistency Error** | Spec is objectively wrong about system behavior | Fix spec, read system code for evidence |
-| **Abstraction Gap** | Spec is correct but at different abstraction level | Judge based on modeling goals (see `references/fix.md`) |
-
-For Inconsistency Errors: read system source code -> find evidence -> fix **base spec** (not trace comparison logic) -> verify with `run_trace_validation_parallel`.
-
-For Abstraction Gaps: understand the gap -> judge whether bridging it helps find more bugs or is just cosmetic -> choose fix strategy accordingly.
-
-**Read `references/fix.md`** for detailed workflow.
+1. Read the stuck event's `actor` and its `pc` in the printed state. Does `StepName` give the
+   event's `action` at that `pc`? If not, the actor took a path the model does not have (a branch, a
+   statement the handler issues that the model lacks, an early error response).
+2. If the step matches, compare the recorded outcome with what the step would produce from this
+   state: rows read (snapshot, locks), error code (unique violation, serialization failure), row
+   count of a write, the rows a COMMIT committed, the response status.
+3. Look at the raw recording when needed: `windows.json` gives the trace's recording directory and
+   window; `pgproxy.ndjson` has the statement text and results, `inbound.ndjson` the request and
+   response bodies.
 
 ---
 
-## Phase 4: Cleanup
+## Phase 3: Classify and fix
 
-The user may request not to clean up the generated files. Otherwise, run `clean_traces`.
+Check suspects from the most generic to the most specific:
+
+| Class | Signs | Fix |
+|---|---|---|
+| **Stack** | events missing or attributed to the wrong request, a COMMIT without committed rows | Rerun `wkstack.py ensure` (it self-tests); report a toolkit issue. Never edit the toolkit. |
+| **Mapping** | a statement mapped to the wrong action, a regex matching two statement shapes, a body field or header not recorded, `rows = false` missing on a result without the key | Fix `harness/mapping.toml`, run `harness/rebuild_traces.sh`, revalidate |
+| **Model: inconsistency** | the model's control flow, guard, statement or isolation level differs from the code | Fix the model from the source code (cite `file:line`) |
+| **Model: abstraction gap** | the model is right at its abstraction level but a recorded detail is outside it (an extra column, a statement on an unmodeled table) | Bridge it only if it matters for the invariants; otherwise abstract it consistently in the mapping and the model, and say why |
+
+Rules for model fixes:
+
+- Fix the **model** (`<App>.tla`), not the trace comparison in `Trace<App>.tla`. Loosening a
+  comparison makes validation pass while the model stays wrong. Change the comparison only when it
+  checks something the recording cannot capture, and document why.
+- Read the source code and find the evidence before changing anything.
+- If a fix changes how a statement is modeled (a plain SELECT that is really `SELECT ... FOR UPDATE`,
+  a step split into `_start`/`_finish`, a new step), update the statement's rule in
+  `harness/mapping.toml` to match, then rebuild the traces with `harness/rebuild_traces.sh` before
+  revalidating. The rebuild uses every recorded window.
+- **Never edit `WebDB.tla` or `WebTrace.tla`.** If PostgreSQL's real behavior seems to differ from
+  WebDB, model around it in the app model with a comment citing the evidence, and record it in the
+  changelog as a library issue.
+- Never edit, delete or cherry-pick traces to make validation pass. A trace that cannot be
+  reproduced is evidence.
 
 ---
 
 ## Critical Rules
 
-1. **Always start with `run_trace_validation`.** It's faster and gives exact failure point.
-2. **Use `TLCGet("level")` in all breakpoint conditions**, never `l`.
-3. **Debug layer by layer.** Coarse -> fine -> variable inspection. Don't skip layers.
-4. **If last hit is an action call, debug INSIDE that action.** The problem is internal.
-5. **Classify error type before fixing.** Inconsistency Error vs Abstraction Gap require different strategies.
-6. **Fix the base spec, not the trace comparison logic.** Unless there is no other option.
-7. **Trace.cfg must have `PROPERTIES TraceMatched`.** Without it, validation silently produces false positives. See Phase 1 prerequisite above.
-8. **Never use `ScheduleWakeup` / `CronCreate` to wait for trace validation runs.** This pipeline runs `claude --print` — any cross-turn timer is silently dropped at `end_turn` and the run is left half-done with exit 0. The MCP trace tools (`run_trace_validation`, `run_trace_debugging`) are blocking and safe; use them. See `../tla-checking-workflow/guide.md` Phase 2 "Batch Mode Constraints."
-9. **Wrap any non-MCP TLC invocation in `timeout N`.** If you shell out to TLC directly via `Bash` (not through MCP tools), use `timeout 30m java tlc2.TLC ...`. Build/test steps invoked from this skill follow the same rule. **For any backgrounded long-running job, use `scripts/infra/wait_for_pid.sh --pid-file ... --timeout ...`** — it blocks on the PID via `tail --pid`, so a SIGTERM'd subprocess still unblocks the wait.
-
----
-
-## Available Tools
-
-| Tool | Purpose | When to Use |
-|------|---------|-------------|
-| `run_trace_validation` | Quick validation check | First step, always |
-| `run_trace_debugging` | Set breakpoints, collect statistics | After validation fails |
-| `get_trace_info` | Check trace file info | Before validation |
-| `validate_spec_syntax` | Check spec syntax | If TLC reports syntax errors |
-| `run_trace_validation_parallel` | Check against multiple traces | After proposed fix |
-| `clean_traces` | Delete generated files | Final cleanup |
-
-## Reference Files
-
-- **`references/validation.md`** — Validation tool parameters, response types, usage examples
-- **`references/debugging.md`** — Layered debugging methodology, hit pattern analysis, variable inspection
-- **`references/fix.md`** — Error classification, fix workflow
+1. **Always validate every trace after a change.** A fix for one trace can break another.
+2. **Diagnose with `--explain` before changing anything.**
+3. **Stack, then mapping, then model.** Each fix is logged in `changelog.md` with its class.
+4. **Fix the model, not the comparison logic.**
+5. **Never use `PROPERTIES TraceMatched` or the TraceMatched-based MCP tools.**
+6. **Never use `ScheduleWakeup` / `CronCreate` to wait.** This pipeline runs the agent non-interactively; any cross-turn timer is silently dropped. Block within the turn.
+7. **Wrap every command in `timeout N`** (the checker runs TLC; `timeout 60m` per invocation is generous). **For any backgrounded long-running job, use `scripts/infra/wait_for_pid.sh --pid-file ... --timeout ...`**.
 
 ## Related Skills
 
-- **spec-generation** — Previous phase: produces the TLA+ specs
-- **code-analysis** — First phase: produces the Modeling Brief
-
-## Additional References
-
-For additional examples beyond the built-in ones, see the [Specula case-studies repository](https://github.com/specula-org/specula-case-studies) which contains 60+ completed case studies across distributed systems, consensus protocols, and concurrent data structures.
+- **spec-generation** — produces the model and the trace spec
+- **harness-generation** — produces the mapping, workloads and traces
+- **validation-workflow** — the loop that alternates trace validation and model checking

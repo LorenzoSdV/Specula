@@ -10,20 +10,24 @@ Run this checklist when, after reading the counterexample, you find yourself thi
 
 ### Step 1. Extract the preconditions
 
-Read the counterexample and write down the set of conditions the violating state requires. Be specific — "node A had property X *while* receiving message Y from B" is a precondition; "node A misbehaved" is not.
+Read the counterexample (as request lanes, from the timeline tool) and write down the set of conditions the violating state requires. Be specific — "request r2 read the seat *after* r1's UPDATE started but *before* r1 committed" is a precondition; "the requests raced" is not.
 
 ### Step 2. For each precondition, ask "what stops this in the real system?"
 
 For every precondition, search the implementation for any guard, gate, check, or reactive update that prevents that condition. Look for:
 
-| Mechanism category | What it looks like in code |
+| Mechanism category | What it looks like in a web app |
 |---|---|
-| **Reactive suppression** | Receiving X resets/clears state Y (e.g., a message resets a timer, a successful response clears a flag) |
-| **Conditional acceptance** | An incoming message is only acted on if a field passes a check (term, view, sequence number, signature) |
-| **Mutual exclusion / leases** | State X locks out action Y for a duration or until a condition holds |
-| **Reentrancy / in-progress guards** | Action only fires if a "not currently doing this" flag holds |
-| **Authentication / quorum proofs** | Message only acted on if signed / certified / quorum-attested |
-| **Rate limits / counters / budgets** | Action only fires within a finite budget that the system tracks |
+| **Database constraints** | UNIQUE, CHECK, foreign keys, exclusion constraints, triggers (read the migrations, not just the ORM schema) |
+| **Locks the code or ORM takes** | `SELECT ... FOR UPDATE`, `select_for_update()`, advisory locks, a conditional `UPDATE ... WHERE stock >= $1` whose row count is checked |
+| **Isolation overrides** | `$transaction(..., { isolationLevel })`, `SET TRANSACTION`, framework settings such as Django `ATOMIC_REQUESTS` |
+| **ORM-implicit transactions** | nested writes, `upsert`, `get_or_create`, `update_or_create`: what they really send |
+| **Middleware** | authentication, rate limiting, idempotency middleware, request deduplication |
+| **Infrastructure** | queue concurrency of 1, cron on a single replica, a Redis lock, provider-side idempotency keys |
+| **Row-level security** | policies that filter what a statement sees or may change |
+
+Not guards: anything that runs only in the browser (a disabled button, client validation, a
+debounce). A direct API call bypasses them.
 
 The implementation's choice to put a guard somewhere is itself information. If the developers wrote `if !x { return }` at the top of a function, they believed `x` could happen — and the spec should let it happen too, while modeling the guard.
 
@@ -31,7 +35,7 @@ The implementation's choice to put a guard somewhere is itself information. If t
 
 For each guard you found in the implementation, check whether the spec models it:
 
-- **Spec models the guard with the same precondition** → guard is faithful, move on.
+- **Spec models the guard with the same precondition** → guard is faithful, move on. (A trace-validated model has already been checked against recordings, but only on the interleavings the traces contain.)
 - **Spec models the guard with a weaker precondition** → spec lets behavior through that the impl blocks. This is **Case B**.
 - **Spec doesn't model the guard at all** → spec explores states the impl can't reach. This is **Case B**.
 - **Impl has no guard for this precondition** → the precondition really can occur. The counterexample is Case C-eligible. Continue verification.
@@ -54,14 +58,13 @@ This trail matters for two reasons. First, it documents that you didn't dismiss 
 
 Bug classes that have a known fidelity trap:
 
-- **Heartbeat-driven leader election** — does the spec model heartbeats *suppressing* the follower's election timer, not just resetting a leader-side counter?
-- **Lease-based reads / Byzantine fast paths** — does the spec model the lease/ticket condition that gates the fast path, or does it allow the fast path unconditionally?
-- **View / term advancement** — does the spec require the same evidence (quorum certificate, signed timeout, etc.) to advance that the impl requires, or can it advance freely?
-- **Garbage collection / reclamation** — does the spec model the same hazard-pointer / epoch / reference-count check that the impl uses to decide reclaim safety?
+- **Lost update / oversell** — is the write really computed in the app (`SET v = $1`), or is it a relative update (`SET v = v - $1`) re-evaluated under the row lock? Is there a conditional `WHERE` whose row count the code checks?
+- **Duplicate records** — is there a UNIQUE index the ORM schema does not show (added in a raw migration)?
+- **Read-then-write races** — does the code lock the row (`FOR UPDATE`) or run at REPEATABLE READ / SERIALIZABLE for that transaction?
+- **Duplicate webhook effects** — does the handler record the provider's event id under a unique constraint before acting?
 
 A spec that models the action but not the *condition under which the action is allowed* will report violations that aren't in the real system.
 
 ## See also
 
-- `case-studies/` contains worked examples where this checklist's pattern applied. Search for `retracted` in `bug-report.md` files to find counterexamples that were ultimately classified as fidelity gaps after this kind of analysis.
 - `tla-checking-workflow/guide.md` Step 3 — this checklist is the detailed version of "Cross-Reference with Implementation".

@@ -10,7 +10,7 @@ Counterintuitive: the `-deadlock` flag turns deadlock detection **off**, not on.
 |---|---|
 | Don't pass `-deadlock`. (Default behavior.) | Pass `-deadlock`. |
 
-Common case: trace validation specs use `-deadlock` because trace exhaustion is detected via the `TraceMatched` temporal property, not via deadlock. Model-checking specs almost always want deadlock checking ON, so omit the flag.
+Web models: a state where every request has finished is a normal terminal state, not a deadlock, so web MC and trace configs set `CHECK_DEADLOCK FALSE`. A real database deadlock is not a TLC deadlock either: WebDB detects it (`40P01`) as PostgreSQL does, and invariants or liveness properties catch its consequences.
 
 ## Simulation mode does not check deadlocks
 
@@ -97,13 +97,12 @@ ServerOrder == [s1 |-> 1, s2 |-> 2, s3 |-> 3]
 \* compare ServerOrder[s1] < ServerOrder[s2]  instead of  s1 < s2
 ```
 
-## `Trace.cfg` without `PROPERTIES TraceMatched` reports false-positive success
+## Web trace configs: `INVARIANT TraceNotDone`, never `PROPERTIES TraceMatched`
 
-A trace validation cfg that omits `PROPERTIES TraceMatched` will report "no errors" even if the trace cursor never advances — TLC has nothing to check, so it trivially succeeds.
-
-Fix: in `Trace.tla` define `TraceMatched == <>(l > Len(TraceLog))`, and in `Trace.cfg` include `PROPERTIES TraceMatched`. Without this, validation success is meaningless.
-
-(See also `tla-trace-workflow/references/validation.md` for the full trace validation prerequisites.)
+Web trace validation is existential: the toolkit's checker sets `Cut` to the number of events and
+reads a violation of `TraceNotDone` as "some behavior matched the whole trace". `TraceMatched`
+(`<>(all events consumed)`) asks that *every* behavior consume the trace; concurrent traces leave
+interleavings open, so it fails on correct models. A config with neither checks nothing.
 
 ## Unconstrained silent actions cause infinite branching
 

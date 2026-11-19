@@ -1,0 +1,3 @@
+---- MODULE WebDB ----
+\* test stub
+====

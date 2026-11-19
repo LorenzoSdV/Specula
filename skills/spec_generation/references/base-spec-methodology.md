@@ -1,136 +1,155 @@
-# Base Spec Methodology
+# Base Spec Methodology: Web Apps on WebDB
 
-How to write a TLA+ base spec from a Modeling Brief.
-
-> **On examples**: any examples below (Raft, hashicorp/raft, cometbft, etc.) are historical instances illustrating mechanics. They are not models to imitate. Adapt to your target system; for Category B targets the right shape is usually thread-local state + shared memory windows rather than messages and roles.
-
-> **Category vocabulary** — fault-category vocabulary lives in `code_analysis/references/distributed-analysis.md`, `concurrent-analysis.md`, and (for BFT) `bft-analysis.md`. Use it as shorthand when it helps; do not treat any category list as a checklist that every target must cover.
+How to write the model (`<App>.tla`, wrapped by `base.tla`) from a Modeling Brief.
 
 ## Principle: Scope-Driven, Code-Faithful
 
-The spec's **scope** follows the requested behavior, system contracts, and Scenarios in the modeling handoff. Include the state and interactions needed for that scope even without a suspected defect. The **logic** within each action must faithfully follow the implementation's actual control flow. For the code paths we model, the spec must match the implementation's conditions, branches, and state updates precisely.
+The model's **scope** follows the requested behavior, contracts and Scenarios in the brief. Include
+the handlers and state needed for that scope even without a suspected defect. The **logic** of each
+step must follow the implementation's control flow exactly: its conditions, branches and state
+updates, for the statements the app really sends.
 
-**Every logic block within an action must be annotated with source code line references.**
+**Every logic block within a step must be annotated with source code line references.**
 
-## Variable Design
-
-Start from the system's actors, identities, state, and interfaces. Every extension variable must cite the scope requirement, contract, or Scenario motivating it and the code it models.
-
-Group variables for UNCHANGED clauses (e.g., `serverVars`, `logVars`, `leaderVars`).
-
-For **Category B** systems, common extension variables include:
-
-- per-thread / per-task PC state
-- cached snapshots of shared pointers / indices / counters
-- reservation vs publication state
-- retire / reclaim queues or epochs
-- ownership-transfer flags
-- helping / fallback / wakeup state
-
-## Action Design
-
-### Naming
-
-Name actions after implementation functions (e.g., `HandleRequestVoteRequest`, not `HandleRV`).
-
-### When to Split
-
-Split a single implementation function into multiple spec actions when:
-1. **Different code paths have different checks** — e.g., one response path checks `resp.Term` while another skips it
-2. **Non-atomic operations have crash windows** — e.g., persistence writes term then votedFor separately
-3. **Independent threads/goroutines have different properties** — e.g., heartbeat runs without disk access while replicate requires disk
-4. **A lock-free operation has separate visibility stages** — e.g., read snapshot -> confirm -> dereference, reserve -> write -> publish, retire -> reclaim
-5. **Ownership transfers across threads** — e.g., enqueue wakeup -> decrement counter -> complete, detach -> fulfill -> bottom-half finish
-
-### Granularity for Concurrent Specs — *the headline fault category*
-
-For concurrent / lock-free targets, action granularity is the most important faithfulness decision in the entire spec. Production concurrent bugs are overwhelmingly pure interleaving bugs — two correct-looking operations run in an order the author did not consider — and TLC is uniquely good at exposing them by exhaustively exploring all interleavings. A spec that collapses a multi-step protocol into one atomic action makes those bugs invisible, no matter how careful the rest of the spec is.
-
-The adversary here is **already present** in TLA+'s default interleaving semantics. You do not add it with an `MCPreempt` action — you express it through how you split actions in the first place.
-
-**Wrong (collapsed)** — `load → check → CAS` as one action:
+## Model Shape
 
 ```tla
-PushNode(t, n) ==
-    /\ shared.head /= NULL_PTR
-    /\ shared' = [shared EXCEPT !.head =
-                    IF @ = pcLocal[t].observed THEN n ELSE @]
+EXTENDS WebDB, TLC
+
+AppTables == {"Seat", "Booking"}
+AppUniqueCols == [tb \in AppTables |->            \* unique indexes after the PK, in creation order
+    CASE tb = "Booking" -> << {"seatId"} >> [] OTHER -> << >>]
+AppRowDomain == [tb \in AppTables |-> {}]          \* only SERIALIZABLE transactions use it
+
+VARIABLES pc, rq, lv, rs, nextId
+appVars == <<pc, rq, lv, rs, nextId>>
+vars == <<dbVars, appVars>>
 ```
 
-Every interleaving where another thread mutates `shared.head` between the load and the CAS is hidden.
+- **Actors are requests** (and job runs, webhook deliveries): WebDB's `Txns` constant, one database
+  session each. Per actor: `pc` (handler step), `rq` (inputs), `lv` (locals), `rs` (response).
+- `Arrive(r, input)`: an idle actor starts a handler with an input record (route, auth token, path
+  and body fields, headers). Requests rejected before any SQL (no auth header, body validation)
+  respond directly from `Arrive`. `Respond(r)`: the response is sent.
+- **Ids from sequences** are app-level counters (`nextId[tb]`) that do not roll back, as in PostgreSQL.
+- **Unique constraints**: `UniqueCols` in index-creation order (the primary key is checked first).
+  Read them from the migrations.
+- **Isolation level**: the database default (PostgreSQL: READ COMMITTED) unless the code overrides it
+  for the transaction; cite it.
+- `RowDomain`: for apps that never use SERIALIZABLE, `[tb \in Tables |-> {}]`. Otherwise every row
+  value the model can produce.
+- Foreign-key checks take KEY SHARE locks that WebDB does not model. Say in the model whether that
+  matters (it does not when no path updates a referenced key column).
 
-**Right (split)** — three actions, one per atomic step:
+## One Step per Statement
+
+Each SQL statement the handler issues is one step, in the order the code issues it:
+
+| Statement | WebDB call | Steps |
+|---|---|---|
+| `SELECT` (no locking) | `Select(r, tb, P)` | 1 |
+| `UPDATE`, `DELETE`, `SELECT ... FOR UPDATE` | `WriteStart(r, kind, tb, P)` then `WriteFinish(r, P, F)`; kind `"update"`, `"delete"`, `"lock"` | 2: the statement can wait on row locks while others run |
+| `INSERT` | `InsertStart(r, tb, key, row)` then `InsertFinish(r)` | 2: unique checks can wait |
+| `BEGIN` / `COMMIT` / `ROLLBACK` | `Begin(r, iso)`, `Commit(r)`, `Rollback(r)` | 1 each |
+
+Statements outside `Begin` are autocommit. `P` is a predicate `LAMBDA k, row : ...`; `F` an update
+`LAMBDA k, row : [row EXCEPT !.held = @ + 1]`.
 
 ```tla
-PushLoad(t) ==
-    /\ pcLocal[t].step = "ready"
-    /\ pcLocal' = [pcLocal EXCEPT ![t] = [step |-> "loaded",
-                                          observed |-> shared.head]]
-    /\ UNCHANGED shared
+\* routes/book.ts:L41 - read the seat inside the transaction (READ COMMITTED)
+Book_ReadSeat(r) ==
+    /\ pc[r] = "bk_read"
+    /\ Select(r, "Seat", LAMBDA k, row : k = rq[r].seatId)
+    /\ IF res'[r].rows = {}
+       THEN ToRollback(r, "bk_rollback", 404)                     \* L42-L43: unknown seat
+       ELSE IF (CHOOSE p \in res'[r].rows : TRUE)[2].held >= (CHOOSE p \in res'[r].rows : TRUE)[2].capacity
+       THEN ToRollback(r, "bk_rollback", 409)                     \* L44-L45: sold out
+       ELSE Go(r, "bk_hold") /\ UNCHANGED rs
+    /\ UNCHANGED <<rq, lv, nextId>>
 
-PushCheck(t) ==
-    /\ pcLocal[t].step = "loaded"
-    /\ ... \* validation logic
-    /\ pcLocal' = [pcLocal EXCEPT ![t].step = "ready_to_cas"]
+\* routes/book.ts:L47 - held = held + 1 (relative: re-evaluated under the row lock)
+Book_Hold_start(r) ==
+    /\ pc[r] = "bk_hold"
+    /\ WriteStart(r, "update", "Seat", LAMBDA k, row : k = rq[r].seatId)
+    /\ Go(r, "bk_hold_f")
+    /\ UNCHANGED <<rq, lv, rs, nextId>>
 
-PushCAS(t) ==
-    /\ pcLocal[t].step = "ready_to_cas"
-    /\ shared.head = pcLocal[t].observed   \* CAS expected check
-    /\ shared' = [shared EXCEPT !.head = pcLocal[t].newNode]
-    /\ pcLocal' = [pcLocal EXCEPT ![t].step = "ready"]
+Book_Hold_finish(r) ==
+    /\ pc[r] = "bk_hold_f"
+    /\ \/ /\ WriteFinish(r, LAMBDA k, row : k = rq[r].seatId, LAMBDA k, row : [row EXCEPT !.held = @ + 1])
+          /\ IF res'[r].ok THEN Go(r, "bk_insert") /\ UNCHANGED rs
+             ELSE ToRollback(r, "bk_rollback", 500)
+       \/ /\ stmt[r] = NoStmt /\ ~res[r].ok                       \* failed while waiting (40P01, 40001)
+          /\ ToRollback(r, "bk_rollback", 500) /\ UNCHANGED dbVars
+    /\ UNCHANGED <<rq, lv, nextId>>
 ```
 
-Each action boundary is an interleaving point. TLC explores every order across these boundaries.
+- **Read each result from `res'[r]`**: `rows` (a set of `<<key, row>>`), `ok`, `code` (SQLSTATE).
+  Branch on it exactly as the handler does: a unique violation (`23505`, Prisma `P2002`, Django
+  `IntegrityError`) → the handler's error path; zero rows → its not-found path.
+- **Every `_finish` step has a branch for a statement that failed while waiting**
+  (`stmt[r] = NoStmt /\ ~res[r].ok`: deadlock or serialization failure).
+- **`LIMIT 1` queries** return any one matching row: choose with `\E p \in res'[r].rows`.
+- **Model the statement, not the ORM call.** A relative update (`SET v = v - $1`) is re-evaluated on
+  the newest row version under the lock; a value computed in the app and written back
+  (`SET v = $1`) is not. That difference is the lost-update bug.
+- **Error handling of the framework**: what an exception inside a transaction does (Prisma rolls
+  back and rethrows; Django `atomic()` rolls back), and what status the client then gets.
 
-**Granularity audit** — when reviewing or generating a base spec, walk every action and ask:
+## Granularity Audit
 
-| Question | If "yes" → split the action |
+Walk every step and ask:
+
+| Question | If "yes" → split |
 |---|---|
-| Does it contain more than one atomic operation that another thread can observe between? | Yes |
-| Does the implementation release a lock or yield within this action? | Yes |
-| Does it span an `await` / `co_await` / `.await` point? | Yes |
-| Does it perform `load → conditional → store` where the load result feeds the store? | Yes |
-| Is it a single CAS, single atomic load, or single atomic store? | No (already correct) |
-| Does the implementation hold a single lock across the whole action with no release? | No (atomic by construction) |
+| Does it cover more than one SQL statement? | Yes |
+| Does it span an `await` on any I/O (cache, queue, external API, email)? | Yes |
+| Does it read a value in one statement and write a value computed from it in another? | Yes (two steps; the gap is the race) |
+| Is it a single statement? | No (already correct; waiting statements are start/finish pairs) |
 
-State-space cost is real, but control it through **counter bounds, hunting configs, and symmetry reduction in the MC layer** — not by collapsing actions in the base spec. Collapsing for state-space reasons is a faithfulness regression that silently kills bug-finding power and is much harder to detect than an explicit bound.
+State-space cost is controlled in the MC layer (fewer actors, narrower `Inputs`, hunt configs), never
+by merging steps. Merging statements hides exactly the interleavings where web bugs live.
 
-See `code_analysis/references/concurrent-analysis.md` § 5.1 for the bug-class reasoning that motivates this.
+## `StepName`, `Step` and `Next`
 
-### Action Structure
+```tla
+StepName(r) ==                       \* the trace action name of r's next step, from its pc
+    CASE pc[r] = "bk_begin"  -> "Begin"
+      [] pc[r] = "bk_read"   -> "Book_ReadSeat"
+      [] pc[r] = "bk_hold"   -> "Book_Hold_start"
+      [] pc[r] = "bk_hold_f" -> "Book_Hold_finish"
+      [] ...
 
-Each action follows this pattern:
-- Action-level comment cites the overall function (`file:line-range`)
-- Every logic block inside (branches, LET bindings, conditions) cites specific source lines
-- Each case in a disjunction has a descriptive comment
+Step(r) == Book_Begin(r) \/ Book_ReadSeat(r) \/ Book_Hold_start(r) \/ Book_Hold_finish(r) \/ ...
 
-### Message Types
+Next == \/ \E r \in Txns : \E input \in Inputs : Arrive(r, input)
+        \/ \E r \in Txns : Step(r) \/ Respond(r)
+        \/ DBSilent /\ UNCHANGED appVars
+```
 
-Use descriptive constants. Include a `msubtype` field when the same RPC type has different code paths (e.g., "heartbeat" vs "replicate" for AppendEntries).
+`StepName` must agree with the instrumentation spec: trace validation matches each recorded
+statement to the step its request is at through it. `DBSilent` is where lock acquisition, deadlock
+detection and serialization failures happen; it must be in `Next`.
 
-## Invariant Design
+## Invariants
 
-Three categories:
-1. **Standard protocol invariants** — fundamental safety properties
-2. **Extension invariants** — target specific Scenarios (primary bug-detection tools)
-3. **Structural invariants** — sanity checks that hold in all correct states
+In `<App>Invariants.tla` (`EXTENDS <App>`), shared by model checking and the reproduction checks.
+Read committed state with `Committed(tb, k)` and `CommittedKeys(tb)`:
 
-## Helpers
+```tla
+\* README "Booking": a seat is never sold beyond its capacity.
+NoOverbooking ==
+    \A s \in CommittedKeys("Seat") :
+        Cardinality({b \in CommittedKeys("Booking") : Committed("Booking", b).seatId = s})
+            <= Committed("Seat", s).capacity
+```
 
-Common patterns: log entry records with type fields, message bags (Send/Discard/Reply using Bags module), configuration helpers for dual-config modeling.
+Each invariant's comment quotes its contract evidence. Three kinds: domain invariants (the app's
+promises), code-level invariants (legal status transitions, idempotency records), structural
+invariants (sanity checks that hold in every correct state).
 
-## Fault Injection
+## Faults
 
-This section defines the fault **actions** — state transitions the adversary can take. The MC spec wraps these with counter bounds (see `mc-spec-pattern.md`). The base spec describes what the adversary can do; the MC spec bounds how often.
-
-**Derive fault-injection actions from the implementation and the failure assumptions of the requested scope and Scenarios.** System-specific fault actions take priority — disk IO blocking, non-atomic persist windows, mid-election config change, NIC packet reorder, signal-during-RMW, JIT barrier reordering, etc. A supported failure does not need a prior bug hypothesis to be represented. The fault-category vocabularies in `distributed-analysis.md`, `concurrent-analysis.md`, and `bft-analysis.md` are starting points for naming, not a constraint on design.
-
-Preserve current fixes and guards. A fault action that removes them describes a modified implementation, so keep any historical regression or mutation experiment separate from the current reference model and its findings. See `mc-spec-pattern.md` § "Fault Category Wrappers — Guidance, Not Templates".
-
-## Crash and Recovery
-
-For non-atomic persistence: after crash, in-memory state reverts to persisted state (which may differ if a non-atomic persist was interrupted).
-
-## Example
-
-See `../examples/cometbft/base.tla` for a complete base spec with extensions, full source line annotations, and action splitting.
+Concurrency is not a fault. Model as bounded faults only what the brief's fault model names: a
+client retry of a request whose response was lost, a crash between two autocommit statements, a
+duplicate webhook delivery, a job retry. Each is an action the MC layer bounds with a counter.

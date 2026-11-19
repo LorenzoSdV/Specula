@@ -13,13 +13,14 @@ These pull in opposite directions. Fixing trace failures may loosen the spec (in
 
 | Item | Description |
 |------|-------------|
-| Base spec | `base.tla` + `base.cfg` — core specification |
-| Trace spec | `Trace.tla` + `Trace.cfg` — trace replay wrapper |
+| Model | `base.tla` and the `<App>.tla` it extends, on the shared `WebDB.tla` |
+| Trace spec | `Trace.tla` + `Trace.cfg.tmpl` — existential trace validation (`WebTrace.tla`) |
 | MC spec | `MC.tla` + `MC.cfg` — model checking wrapper (standard + structural invariants) |
 | Hunting configs | `MC_hunt_*.cfg` — Scenario-specific configs (for bug hunting) |
-| Trace files | `.ndjson` files from instrumented test runs |
-| Instrumentation spec | `instrumentation-spec.md` — maps spec actions to source code locations |
-| Run command | Command to launch TLC for model checking |
+| Trace files | `traces/*.ndjson` recorded through the tracing stack, with `traces/windows.json` |
+| Mapping | `harness/mapping.toml` — recorded routes and SQL shapes → model actions; `harness/rebuild_traces.sh` |
+| Instrumentation spec | `instrumentation-spec.md` — each action's route or statement shape |
+| Toolkit | Paths and stack commands in the prompt's "Web toolkit and tracing stack" section |
 
 ## Output
 
@@ -40,11 +41,12 @@ All artifacts are relative to `.specula-output/`:
 
 ## Phase 0: Initialization
 
-1. **Verify all files exist**: base spec, trace spec, MC spec, trace files, instrumentation-spec, hunting configs
-2. **Read `instrumentation-spec.md`**: understand the mapping between spec actions and source code locations — you'll need this when analyzing failures and making fixes
-3. **Read `harness/INSTRUMENTATION.md`**: understand how to adjust instrumentation if trace validation reveals capture timing or field issues
-4. **Check `Trace.cfg` has `PROPERTIES TraceMatched`** (uncommented). If missing, add it — without it validation reports false positives.
-5. **Create `spec/changelog.md`** (or open existing one)
+1. **Verify all files exist**: model, trace spec and template, MC spec, hunting configs, traces, mapping, instrumentation-spec
+2. **Read `instrumentation-spec.md` and `harness/mapping.toml`**: how each action is recognized in a recording — you'll need this when analyzing failures and making fixes
+3. **Read `harness/INSTRUMENTATION.md`**: what the harness phase found the model missing, and where the recordings are
+4. **Check the trace config template uses `INVARIANT TraceNotDone`** and has no `PROPERTIES TraceMatched` (web traces are validated existentially; see `../tla-trace-workflow/guide.md`)
+5. **Check coverage**: `python3 <toolkit>/tracecheck/coverage.py --mapping harness/mapping.toml traces/` must pass. If it does not (for example a new step added to the model and mapping), extend `harness/workloads.py` and record more traces with the runner (`harness/run.sh`) before validating
+6. **Create `spec/changelog.md`** (or open existing one)
 
 ---
 
@@ -55,9 +57,9 @@ All artifacts are relative to `.specula-output/`:
 **Delegate to sub-skill**: Follow the methodology in `../tla-trace-workflow/guide.md`.
 
 **Steps**:
-1. Run `run_trace_validation_parallel` on all trace files
-2. For each failing trace: debug and fix following the trace workflow
-3. After each fix, re-run `run_trace_validation_parallel` to check for regressions
+1. Validate all traces with the toolkit's checker (`<toolkit>/tracecheck/check.py ... traces/`)
+2. For each rejected trace: diagnose with `--explain` and fix (stack, mapping, then model) following the trace workflow
+3. After each fix, rebuild the traces if the mapping changed (`harness/rebuild_traces.sh`) and revalidate all of them to check for regressions
 4. Record each fix in `changelog.md` (see format below)
 5. Continue until all traces pass
 
@@ -98,7 +100,7 @@ All artifacts are relative to `.specula-output/`:
 
 **Tracking regressions**: If a trace that passed in a previous round now fails, mark it as `[regression]` in changelog. This is informational — handle it the same way as any other failure.
 
-**Convergence**: Both phases pass in the same round with no spec modifications needed. The spec is now trusted. Proceed to Bug Hunting.
+**Convergence**: Both phases pass in the same round with no spec modifications needed, **and the coverage gate passes** for the current mapping and traces. The spec is now trusted. Proceed to Bug Hunting.
 
 ---
 
@@ -128,7 +130,7 @@ Liveness configs run BFS only, without the simulation follow-up, because simulat
 1. Collect any `[bug]` entries already recorded in `changelog.md` during Phase 2 (Case C found during convergence) — these will be included in the final report
 2. For each `MC_hunt_*.cfg`:
    - **Run 1 (BFS)**: Launch TLC model checking (30 min). Record whether it exhausted the state space, the depth, and the state count from output.
-   - If violation found → **Case C** (real bug). Analyze counterexample: describe execution path, cross-reference with implementation code, identify root cause and affected code locations. Then keep exploring the same config: rerun with `-C` (TLC `-continue`), or disable that property or filter the known counterexample, keeping the other properties enabled.
+   - If violation found → **Case C** (real bug). Run TLC with `-j <out>.json` (JSON counterexample) and render it as request lanes with `python3 <toolkit>/timeline/timeline.py <out>.json --invariant <Invariant>`: each request's statements, what it read, where it waited, and what each COMMIT changed. Describe the execution path from it, cross-reference with implementation code, identify root cause and affected code locations. Then keep exploring the same config: rerun with `-C` (TLC `-continue`), or disable that property or filter the known counterexample, keeping the other properties enabled.
    - If BFS did not exhaust the state space → **Run 2 (Simulation)**: Launch TLC simulation (30 min, `-S -n 999999999`) on the same config with enough depth to reach the target interactions. Skip this for liveness configs.
    - Save all TLC output to `spec/output/`
 3. Produce `spec/bug-report.md` with all findings — **read `references/bug-report-format.md`** for the template
@@ -144,6 +146,7 @@ Maintain a single `spec/changelog.md`. One line per fix, grouped by round.
 ```markdown
 ## Round N - Trace Validation
 - [fix] ActionName: brief description of what was wrong and how it was fixed (Trace: filename.ndjson)
+- [fix-mapping] RuleName: what the mapping matched wrongly; traces rebuilt (Trace: filename.ndjson)
 - [regression] ActionName: brief description (Trace: filename.ndjson, was passing in Round M)
 
 ## Round N - Model Checking
@@ -180,10 +183,6 @@ Converged in N rounds. Bug hunting: M bugs found / no bugs found.
 
 ## Related Skills
 
-- **harness-generation** — Previous phase (2.5): produces harness, traces, and `INSTRUMENTATION.md` for adjusting instrumentation during validation
+- **harness-generation** — Previous phase (2.5): produces the mapping, workloads, traces, and `INSTRUMENTATION.md`
 - **spec-generation** — Produces the TLA+ specs that this workflow verifies
 - **code-analysis** — Analyzes system implementation to produce modeling briefs
-
-## Additional References
-
-For additional examples beyond the built-in ones, see the [Specula case-studies repository](https://github.com/specula-org/specula-case-studies) which contains 60+ completed case studies across distributed systems, consensus protocols, and concurrent data structures.

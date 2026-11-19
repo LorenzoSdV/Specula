@@ -15,9 +15,9 @@ The finding goes through two phases in order: investigation (Phase 1) and reprod
 
 **Confirmation loop.** When reproduction concludes — with a citation — that a counterexample is a spec / fault-model / invariant **artifact** rather than a real bug, it does not drop the finding. It emits a semantic repair-request draft (`PENDING REPAIR`) that hands the finding back to Phase 3 for a scoped repair. A per-finding worker never allocates an RR id or writes the shared queue: the invoking dispatcher validates the draft, stamps lifecycle fields (including the immutable candidate `finding_id`), and publishes the final request. `bug_id: Bug N` is only a report label, never request identity. Phase 3 and the orchestrator then follow `references/repair-request-format.md`; a scoped confirmation worker continues the existing evidence it is given instead of starting from scratch. The orchestrator caps the loop at a fixed number of rounds and files any still-open repair request under `repair-requests/deferred/` for a developer (the `DEFERRED` disposition is the orchestrator's, never your verdict).
 
-## Web applications (Category W)
+## Reproducing in a web application
 
-If the modeling brief says the target is Category W (HTTP request handlers over a shared database, modelled on `WebDB.tla`), read [references/web-reproduction.md](references/web-reproduction.md) before Phase 2. It gives the web escalation ladder (Level 1 is a proxy-scheduled replay of the counterexample), the web-specific prohibited shortcuts, the same-bug trace check, and how to turn a lock-wait failure into a cited `SPEC_REPAIR`. It adds to this guide; it does not change the verdict table.
+Every target is a web application (HTTP handlers, jobs and webhooks over a shared database, modeled on `WebDB.tla`) running under the tracing stack. Read [references/web-reproduction.md](references/web-reproduction.md) before Phase 2. It gives the web escalation ladder (Level 1 is a proxy-scheduled replay of the counterexample), the web-specific prohibited shortcuts, the same-bug trace check, how to turn a lock-wait failure into a cited `SPEC_REPAIR`, and how to check that the violated property is actually promised. It adds to this guide; it does not change the verdict table.
 
 ## Per-bug output schema
 
@@ -31,7 +31,7 @@ If the modeling brief says the target is Category W (HTTP request handlers over 
 |---|---|---|
 | `REPRODUCED` | bug | You triggered the live harm through a real interface / an admissible CE step, and a real consumer/caller observes the wrong outcome. |
 | `MASKED` | finding | Real defect, but you PROVED a safeguard / downstream mechanism (sync / loopback / resend / guard) / a discarded output / a *separate* bug currently masks the consequence — name the mask. |
-| `ENV_LIMITED` | finding | Real defect with a SOUND argument production exhibits it, but this environment cannot trigger it (needs a real cluster / hardware / timing) — name the env limit. |
+| `ENV_LIMITED` | finding | Real defect with a SOUND argument production exhibits it, but this environment cannot trigger it (needs several replicas, a provider's live API, production data volume) — name the env limit. |
 | `PENDING REPAIR` | MC → repair | (MC only) the counterexample needs a state the code cannot reach, or flags a benign state — a spec / fault-model / invariant artifact. Cite it and emit an RR (`SPEC_REPAIR` / `FAULT_MODEL` / `INVARIANT`). |
 | `DROPPED` | pre-filter | Code-review-sourced AND an existing issue / PR / CVE already reported THIS exact defect (decided in Phase 1, before reproduction). Cite it. |
 | `FALSE POSITIVE` | not a bug | Not a defect at all — documented / intended, nothing reads the value, or a fabricated / unreachable trigger. |
@@ -65,6 +65,3 @@ This pipeline runs `claude --print` (non-interactive batch). The harness exits a
 
 See `../tla-checking-workflow/guide.md` Phase 2 "Batch Mode Constraints" for full rationale.
 
-## Additional References
-
-For examples beyond the built-in ones, see the [Specula case-studies repository](https://github.com/specula-org/specula-case-studies) which contains 60+ completed case studies across distributed systems, consensus protocols, and concurrent data structures.

@@ -7,7 +7,7 @@
 **Reuse before declaring the environment unavailable.** A binary missing from `PATH`, or one failed build/bootstrap command, is not enough for `ENV_LIMITED`. First inspect the target checkout and current `.specula-output/` for compatible existing build artifacts (including symlinks), and inspect prior harness/build logs for a known-successful command and environment. Check each artifact's source SHA, build configuration, and provenance before reuse. Treat an instrumented or uncertain artifact as a smoke check and recipe source unless its modifications are explicitly compatible with the reached escalation level and documented. Before giving up on a build/runtime problem, make one bounded attempt within the caller's time and resource budget to replay or rebuild from an applicable known-good recipe, and record what you searched, reused, attempted, or rejected.
 
 **When you cannot reproduce the live harm of a REAL defect, it is exactly one of three — pick by WHY it did not manifest, never a vague "reproduction failed":**
-- **`ENV_LIMITED`** — the defect is real and *would* harm in production, but THIS environment cannot trigger it (needs a real cluster / hardware / timing). Requires a SOUND argument that production exhibits it, naming the exact env limitation. It is not a blanket "stands on code audit".
+- **`ENV_LIMITED`** — the defect is real and *would* harm in production, but THIS environment cannot trigger it (needs several replicas, a provider's live API, production data volume). Requires a SOUND argument that production exhibits it, naming the exact env limitation. It is not a blanket "stands on code audit".
 - **`MASKED`** — the defect is real but a safeguard / downstream mechanism (sync / loopback / resend / guard) / a discarded output / a *separate* bug currently masks the harm, so it does not bite today. Name the mask (prove it fires — see below).
 - **`PENDING REPAIR`** — (MC only) the counterexample is a spec / fault-model / invariant artifact: the CE needs something the real code cannot do, or flags a benign state. Emit a repair request (see "When a counterexample is an artifact").
 
@@ -15,7 +15,7 @@
 
 For every bug, you MUST:
 
-1. Write a self-contained reproduction test to `repro/test_bug<N>_<name>.{py,js,rs,go,c,sh}`
+1. Write a self-contained reproduction test to `repro/test_bug<N>_<name>.{py,sh}`
 2. Actually EXECUTE the test and record the output
 3. Walk the escalation ladder strictly in order (Level 0 → 1 → 2 → 3); document at each level what was tried and what happened
 4. Choose exactly one final outcome from the decision table and include the evidence it requires
@@ -36,18 +36,19 @@ For every bug, you MUST:
 ### Required
 
 - Trigger through the system's public interfaces or normal entry points; the trigger path must be consistent with real-world usage scenarios
-- For concurrency bugs, reproduce via real concurrent scenarios (multi-thread/multi-process). Small delays may be inserted into the code under test to widen the race window, but the logic must not be altered
-- For a **memory-ordering / happens-before** claim specifically, a native run on a strong-memory host (x86/TSO) can neither confirm nor refute it — acquire/release/relaxed all behave as if sequentially consistent there, so a green run proves nothing. Use a weak-memory model checker (Relacy / Loom / CDSChecker / `herd`) with **positive and negative controls** (weaken the ordering and show the race then appears), or give an explicit `[atomics.fences]`-level argument. Do not rest the verdict on a TSO run
+- For races, reproduce with real concurrent requests through the app's HTTP API. The interleaving may be controlled at the database proxy (Level 1), but the app's code and logic must not be altered
 - When the finding's mechanism spans **multiple operations or code paths** (create / update / delete, several triggers, error vs happy path), exercise **each** before settling — especially the **delete / cleanup / crash-recovery paths**, where durable-state bugs hide. A verdict read from only one path (e.g. update) can wrongly land `MASKED` / `FALSE POSITIVE` while another path (e.g. delete) is a live `REPRODUCED`
-- For protocol bugs, trigger via sequences of messages that are legitimate but adversarial. The messages themselves must pass the system's normal validation
+- For business-rule bugs, trigger via sequences of requests, job runs or webhook deliveries that are legitimate but adversarial (a retry, a double submit, two tabs, a delivery the provider documents it may repeat). Each must pass the app's normal validation and authentication
 - The reproduction program should compile and run independently, without requiring special environments beyond the test framework
 - The reproduction is deterministic, or triggers with significant probability across multiple runs
-- The success criterion must be observable anomalous behavior (crash, deadlock, data inconsistency, safety property violation), not "some intermediate variable has an unexpected value"
+- The success criterion must be observable anomalous behavior through a public read path (an API response, a page, an email in the mail catcher, a provider-stub ledger), not "some intermediate variable has an unexpected value" and not database contents alone
 - For a **liveness** finding (a counterexample from a `_live` cfg), the anomaly is progress that never happens. Show three things in the run: the condition that should lead to progress becomes true and stays true; the threads, timers, or handlers that the spec's fairness assumes keep running (log or instrument them); and the progress still has not happened after waiting several times longer than every relevant timeout or retry interval. A test that merely times out is not enough
 
 ## Escalation ladder — strict, in order
 
 Your goal is to either **prove the bug manifests** (trigger it) or **prove the escalation ladder is exhausted** (document each level's attempt and outcome). "I tried once and it didn't trigger" is NOT a conclusion.
+
+The levels below are the general definitions; `references/web-reproduction.md` gives each level's web form (Level 0: concurrent HTTP requests started together; Level 1: proxy-scheduled replay of the counterexample; Level 2: preconditions through the app's own API or seed; Level 3: an environment-gated pause at an `await` with no database statement).
 
 1. **Level 0 — Pure black-box.** Use only public APIs, normal operations, no failpoints. Always start here.
 2. **Level 1 — Timing assistance.** Add `sleep()` calls or use system-provided test hooks (e.g., `configureFailPoint`, `FAIL_POINT_DEFINE`) to widen race windows. The system logic is unchanged; you're only controlling timing.
@@ -60,9 +61,9 @@ For known/historical bugs that already have a working reproduction in the upstre
 
 ## Verify you triggered the RIGHT bug
 
-After triggering anomalous behavior, verify it matches the MC counterexample (or the code-review claim). Compare:
+After triggering anomalous behavior, verify it matches the MC counterexample (or the code-review claim). For an MC finding, record the reproduction run's own trace and run the same-bug check (`tracecheck/check.py --violates`, see `references/web-reproduction.md`): `REPRODUCED` there means the model matches the whole recorded run and the run ends violating the same invariant. Also confirm:
 
-- The sequence of operations matches the MC trace (same actions, same order)
+- The sequence of statements matches the counterexample (same requests, same order of the statements that matter)
 - The violated invariant is the same one MC found
 - The root cause is the same code path the finding identified
 
@@ -103,7 +104,7 @@ When you emit a draft: return `PENDING REPAIR` and stop processing that finding.
 
 ## Output requirements
 
-- For each bug: one executable test file in `repro/test_bug<N>_*.{py,js,rs,go,c,sh}`
+- For each bug: one executable test file in `repro/test_bug<N>_*.{py,sh}`
 - The test must have been actually executed (not just written); the output must be captured
 - The `confirmed-bugs.md` entry must include the actual test output (copy-paste) as evidence, not just a status label
 - ENV_LIMITED entries still get a `repro/` file — the file contains the attempt code at each escalation level and a comment explaining why each level didn't trigger

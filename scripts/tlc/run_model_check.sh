@@ -2,12 +2,14 @@
 ################################################################################
 # Generic Model Check Script
 # Usage: ./run_model_check.sh -s SPEC_FILE -c CONFIG_FILE [options]
-# ex: nohup ../../../../../../scripts/tlc/run_model_check.sh -s MCetcdraft.tla -c MCetcdraft.cfg -m 50G -w 90 -t 120 -D -S -p 200 -n 99999999 -A -o nohup.out & 
+# ex: nohup scripts/tlc/run_model_check.sh -s MC.tla -c MC.cfg -m 8G -w 8 -t 120 -D -S -p 200 -n 99999999 -A -o nohup.out & 
 ################################################################################
 
-# Default Defaults
-MEMORY="50G"
-OFFHEAP_MEMORY="200G"
+# Default Defaults: a quarter of physical memory each for heap and off-heap (fingerprint set),
+# so the defaults fit a laptop as well as a server. Override with -m / -M.
+_QUARTER_GB="$(python3 -c 'import os; print(max(1, os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") // 4 // 2**30))' 2>/dev/null || echo 4)"
+MEMORY="${_QUARTER_GB}G"
+OFFHEAP_MEMORY="${_QUARTER_GB}G"
 WORKERS="auto"
 TIMEOUT_MINUTES=180
 MAX_DEPTH=0
@@ -33,8 +35,8 @@ usage() {
     echo "  -c FILE    Config file (.cfg)"
     echo ""
     echo "General Options:"
-    echo "  -m MEM     Memory limit (default: 50G)"
-    echo "  -M MEM     Off-heap memory limit (default: 200G)"
+    echo "  -m MEM     Memory limit (default: 1/4 of physical memory)"
+    echo "  -M MEM     Off-heap memory limit (default: 1/4 of physical memory)"
     echo "  -w NUM     Workers (default: auto)"
     echo "  -t MIN     Timeout in minutes (default: 180)"
     echo "  -o FILE    Output log file (default: generated timestamp)"
@@ -61,10 +63,10 @@ usage() {
     echo ""
     echo "Examples:"
     echo "  # Standard model checking"
-    echo "  $0 -s MC.tla -c MC.cfg -m 50G -w 80 -d 100 -D"
+    echo "  $0 -s MC.tla -c MC.cfg -m 8G -w 8 -d 100 -D"
     echo ""
     echo "  # Model checking - continue after errors"
-    echo "  $0 -s MC.tla -c MC.cfg -m 50G -w 80 -C"
+    echo "  $0 -s MC.tla -c MC.cfg -m 8G -w 8 -C"
     echo ""
     echo "  # Simulation mode - generate traces"
     echo "  $0 -s MC.tla -c MC.cfg -S -n 1 -f traces/trace -w 80 -D"

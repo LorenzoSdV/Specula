@@ -33,6 +33,7 @@ from unittest import mock
 
 PKG = Path(__file__).resolve().parents[2] / "src" / "specula"
 
+from specula import stacklib
 from specula import phaselib, resumelib
 from specula import pipelinelib as pl
 
@@ -291,7 +292,8 @@ class TestPromptExtra(EnvIsolatedCase):
         self.patch_root(phaselib, self.tmp())
         self.set_run_dir(self.tmp())
         ws = phaselib.Workspace(["foo"])
-        self.assertEqual(self._inject(ws, "foo"), "PROMPT")
+        # No guidance: only the web toolkit section (static per target) follows the prompt.
+        self.assertEqual(self._inject(ws, "foo"), "PROMPT" + stacklib.prompt_section(ws.work_dir("foo")))
 
     def test_legacy_cwd_fallback_unchanged(self) -> None:
         cwd = self.tmp()

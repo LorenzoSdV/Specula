@@ -42,7 +42,7 @@ from typing import Any
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     sys.modules["specula.pipelinelib"] = sys.modules[__name__]
-from specula import ci_init, ci_verdict, confirm_first, delegation, notes, output_contract, resumelib, rules
+from specula import ci_init, ci_verdict, confirm_first, delegation, notes, output_contract, resumelib, rules, stacklib
 from specula import quota as _quota
 from specula.adapters.utils.run_lock import inherited_run_lock_fds
 from specula.agent_config import (
@@ -122,7 +122,13 @@ USAGE_SCRIPT = SPECULA_ROOT / "scripts" / "exp" / "usage.sh"
 PHASE_TERMINATION_GRACE_SECONDS = 3.0
 
 USAGE = """
-Full Specula pipeline: Code Analysis → Spec Generation → Harness Generation → Validation + Bug Hunting
+Full Specula pipeline for web applications:
+Code Analysis → Stack → Spec Generation → Harness Generation → Validation + Bug Hunting → Confirmation
+
+The Stack step is deterministic (no agent): it starts the target's tracing stack from the
+stack config Phase 1 writes (<work>/stack/stack.toml) and self-tests every signal source; the
+pipeline stops if the self-test fails. The stack is re-checked before every later phase and
+stopped after a successful run (recordings are kept under <work>/stack/runs/).
 
 Runs all phases with optional review agents between each phase.
 All agent logs and review results are saved for inspection.
@@ -144,6 +150,9 @@ Options:
   --skip-specgen         Skip spec generation (use existing outputs)
   --skip-harness         Skip harness generation (use existing harness/traces)
   --skip-validate        Skip validation
+  --skip-stack           Do not start or check the tracing stack (dry runs and debugging only)
+  --keep-stack           Leave the tracing stack running after the pipeline completes
+  --webkit=PATH          Web toolkit directory (default: $SPECULA_WEBKIT, else ../webkit next to Specula)
   --skip-confirmation    Skip Phase 4a bug confirmation
   --skip-classification  Skip Phase 4b severity classification
   --skip-repair-loop     Skip the confirmation back-edge repair loop (default: enabled)
@@ -380,6 +389,8 @@ class Pipeline:
         self.skip_specgen = False
         self.skip_harness = False
         self.skip_validation = False
+        self.skip_stack = False  # --skip-stack: never start or check the tracing stack
+        self.keep_stack = False  # --keep-stack: leave it running after a successful run
         self.skip_confirmation = False
         self.skip_classification = False
         self.skip_repair_loop = False
@@ -480,6 +491,12 @@ class Pipeline:
                 self.skip_harness = True
             elif arg == "--skip-validate":
                 self.skip_validation = True
+            elif arg == "--skip-stack":
+                self.skip_stack = True
+            elif arg == "--keep-stack":
+                self.keep_stack = True
+            elif arg.startswith("--webkit="):
+                os.environ[stacklib.WEBKIT_ENV] = os.path.abspath(arg.split("=", 1)[1])
             elif arg == "--skip-confirmation":
                 self.skip_confirmation = True
             elif arg == "--skip-classification":
@@ -3434,6 +3451,9 @@ class Pipeline:
                 "SPECULA_CLAUDE_ALIAS": self.claude_alias,
             }
         )
+        webkit = stacklib.webkit_root()
+        if webkit is not None:
+            env[stacklib.WEBKIT_ENV] = str(webkit)
         if self.tlc_memory_limit is not None:
             env[MEMORY_LIMIT_ENV] = self.tlc_memory_limit
         if self.tlc_worker_limit is not None:
@@ -3550,6 +3570,48 @@ class Pipeline:
             if phase is not None:
                 self._capture_resource_invocation(phase, resource_names, invocation_id)
             self.refresh_target_indexes()
+
+    def ensure_stacks(self, names: list[str], before: str, *, allow_missing: bool = False) -> None:
+        """Deterministic stack step: leave every target's tracing stack running and self-tested.
+
+        Reuses a running stack with the same config (a quick self-test); otherwise (re)starts it.
+        A failing self-test stops the pipeline before any agent records traces from a broken stack.
+        """
+        if self.skip_stack:
+            log(f"Skipping stack check before {before} (--skip-stack)")
+            return
+        divider()
+        log(f"STACK: start or reuse, then self-test (before {before})")
+        divider()
+        if self.dry_run:
+            for name in names:
+                log(f"[DRY RUN] wkstack ensure --config {stacklib.config_path(Path(self.get_work_dir(name)))}")
+            return
+        for name in names:
+            work = Path(self.get_work_dir(name))
+            if allow_missing and not stacklib.config_path(work).is_file():
+                log(f"{name}: no stack config yet ({stacklib.config_path(work)}); the next phase writes it")
+                continue
+            try:
+                record = stacklib.ensure(work)
+            except stacklib.StackError as exc:
+                log(f"ERROR: {name}: {exc}")
+                raise SystemExit(1) from exc
+            log(f"{name}: stack run {record['run_id']} self-tested; app at {record['base_url']}")
+
+    def stop_stacks(self, names: list[str]) -> None:
+        if self.skip_stack or self.dry_run:
+            return
+        if self.keep_stack:
+            log("Leaving the tracing stack running (--keep-stack)")
+            return
+        for name in names:
+            work = Path(self.get_work_dir(name))
+            if stacklib.config_path(work).is_file():
+                try:
+                    stacklib.down(work)
+                except stacklib.StackError as exc:
+                    log(f"WARNING: {name}: could not stop the stack: {exc}")
 
     def run_phase1_analysis(self) -> None:
         self._phase(
@@ -4090,6 +4152,7 @@ class Pipeline:
                 out.append("- **Phase 1 (Analysis)**: MISSING")
 
             out.append(self._review_line("Analysis Review", work_dir / "review-analysis.md"))
+            out.append(self._stack_summary_line(work_dir))
 
             if self.confirm_first == "continue":
                 sealed = confirm_first.summary(work_dir)
@@ -4209,6 +4272,30 @@ class Pipeline:
         log(f"Summary written to: {summary_file}")
 
     @staticmethod
+    def _stack_summary_line(work_dir: Path) -> str:
+        try:
+            state = json.loads(stacklib.state_path(work_dir).read_text())
+        except (OSError, json.JSONDecodeError):
+            state = None
+        if not isinstance(state, dict):
+            if stacklib.config_path(work_dir).is_file():
+                return "- **Stack**: config present, never self-tested by the orchestrator"
+            return "- **Stack**: MISSING (no stack/stack.toml)"
+        coverage = ""
+        try:
+            report = json.loads((work_dir / "harness" / "coverage.json").read_text())
+            seen = sum(1 for n in report.get("actions", {}).values() if n)
+            coverage = f"; coverage {seen}/{len(report.get('actions', {}))} actions, " + (
+                "gate PASS" if report.get("ok") else "gate FAIL"
+            )
+        except (OSError, json.JSONDecodeError, AttributeError):
+            pass
+        return (
+            f"- **Stack**: run {state.get('run_id')} self-tested at {state.get('selftest_at')}"
+            f" (recordings: stack/runs/){coverage}"
+        )
+
+    @staticmethod
     def _review_line(label: str, path: Path) -> str:
         if path.is_file() and path.stat().st_size > 0:
             return f"- **{label}**: written ({_wc_l(path)} lines)"
@@ -4275,6 +4362,10 @@ class Pipeline:
         if self.orchestration == "single-session":
             from specula.single_session import SingleSessionRun
 
+            log(
+                "WARNING: single-session orchestration does not run the tracing-stack phase or its "
+                "deterministic gates; web targets need the default phased orchestration"
+            )
             return SingleSessionRun(self).main()
         self.print_run_header()
 
@@ -4347,6 +4438,7 @@ class Pipeline:
             raise SystemExit(1)
         if recovered_phase3_commits:
             log("Resuming committed repair result before upstream phases")
+            self.ensure_stacks(names, "the resumed repair loop")
             with self.resource_phase("phase4a", names):
                 phase3_targets = self.run_repair_loop(prepared_commits=recovered_phase3_commits)
             resumed_repair = True
@@ -4359,6 +4451,14 @@ class Pipeline:
                 self.run_review("analysis", names)
         else:
             log("Skipping Phase 1 (--skip-analysis)")
+
+        # Phase 1 wrote stack/stack.toml; the stack must run (and pass its self-test) from here on.
+        if not (self.skip_specgen and self.skip_harness and self.skip_validation and self.skip_confirmation):
+            self.ensure_stacks(
+                names,
+                "Phase 2" if not self.skip_specgen else "the next phase",
+                allow_missing=self.byom_path is not None and not self.skip_specgen,
+            )
 
         if self.confirm_first == "continue":
             self.run_confirm_first_stage(names)
@@ -4375,6 +4475,8 @@ class Pipeline:
 
         if not self.skip_harness:
             with self.resource_phase("phase2_5", names):
+                if not self.skip_specgen or self.byom_path is not None:
+                    self.ensure_stacks(names, "Phase 2.5")
                 self.wait_for_phase_quota("harness")
                 self.run_phase2_5_harness()
         elif self.confirm_first != "only":
@@ -4390,6 +4492,7 @@ class Pipeline:
             and self.has_open_repair_requests()
         ):
             log("Resuming pending repair requests before the ordinary Phase 3 pass")
+            self.ensure_stacks(names, "the resumed repair loop")
             with self.resource_phase("phase4a", names):
                 phase3_targets = self.run_repair_loop(prepared_commits=set())
             resumed_repair = True
@@ -4404,6 +4507,8 @@ class Pipeline:
         normal_phase3_ran = False
         if not self.skip_validation and not phase3_covered:
             with self.resource_phase("phase3", names):
+                if not self.skip_harness:
+                    self.ensure_stacks(names, "Phase 3")
                 self.wait_for_phase_quota("validate")
                 self.run_phase3_validation()
                 self.run_review("validation", names)
@@ -4425,6 +4530,7 @@ class Pipeline:
         fresh_phase4_ran = False
         if not self.skip_confirmation and confirmation_names:
             with self.resource_phase("phase4a", confirmation_names):
+                self.ensure_stacks(confirmation_names, "Phase 4a")
                 self.wait_for_phase_quota("confirm")
                 if confirmation_names == names:
                     self.run_phase4_confirmation()
@@ -4467,6 +4573,7 @@ class Pipeline:
         self.generate_summary()
         self._complete_resource_summaries(names)
         self.refresh_output_indexes()
+        self.stop_stacks(names)
 
         elapsed = int(time.time()) - start_time
         print()

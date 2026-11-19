@@ -13,10 +13,12 @@ The Modeling Brief describes the behavior, contracts, and abstractions needed to
 Describe the system at the level needed to understand the modeling scope:
 
 - System name, language, scale (LOC of core logic)
-- System category: **Category A (Distributed / Message-Passing)** or **Category B (Concurrent / Lock-Free)**, with one-sentence justification
-- What protocol/algorithm it implements
-- Key architectural choices that deviate from the reference algorithm
-- Concurrency model (single-threaded event loop, goroutines, async, etc.)
+- Framework, ORM, database (versions from lockfiles)
+- Isolation level of each transaction (database default and per-transaction overrides), cited
+- Stores and channels: databases, caches, queues and job runners, webhooks in and out, external APIs
+- Deployment profile that matters for concurrency (replicas, cron placement, queue concurrency, pool size); unknown is fine
+- Concurrency model: how many requests run at once (process model, worker count, async runtime)
+- Seeded accounts and data from the app's seed command (later phases use them to drive the API)
 
 ### 2. Scenarios
 
@@ -134,7 +136,7 @@ Every concrete suspected defect found during Code Analysis, one row each, whethe
 ```
 
 - **ID**: `D-<n>`, unique in the brief and its companion documents.
-- **Category**: `protocol`, `concurrency`, or `low-level`.
+- **Category**: `protocol` (a business rule or state machine across requests), `concurrency` (an interleaving of requests, jobs or webhooks), or `low-level` (a single-request defect: validation, authorization, error handling).
 - **Verification**: `MC` when a Scenario models the defect, otherwise `CR` (confirmed by code review and tests in Bug Confirmation).
 - **Scenario**: the Scenario that models it for `MC` rows; `—` otherwise.
 - **Known**: `none`, or the issue / PR / CVE that already reports this exact defect and whether it is fixed upstream (the defect is still present in the analyzed source). Record known defects too; Bug Confirmation applies the known-defect policy.
@@ -173,6 +175,6 @@ Links to detailed evidence for the spec author to consult:
 4. **Connect the baseline and the Scenarios.** Group findings by mechanism and explain how they interact with the system behavior being modeled. A component does not need a suspected bug to belong in the requested model.
 
 5. **Explicit exclusions**. Stating what NOT to model is as valuable as stating what to model. It prevents the spec author from wasting effort.
-6. **Category must carry forward.** Later phases should be able to read the brief and immediately know whether to use distributed-style or concurrent-style modeling and trace validation.
-7. **Put category-specific detail in the right place.** The brief should record the category and chosen scenarios, but the reusable playbooks live in `distributed-analysis.md` and `concurrent-analysis.md`, with `bft-analysis.md` as a BFT overlay on top of distributed.
+6. **Name the statements.** For each Scenario, list the SQL statements (or ORM calls) each entry point issues, in order, with their transaction and isolation level: the spec author models one step per statement.
+7. **Cite contract evidence for every invariant.** The README, docs, API contract, a constraint, a test, or enforcing code on another path. The brief's own wording is not evidence.
 8. **Distinguish historical and current results.** Preserve current fixes and use their history to explain modeled behavior and properties. Label historical or regression checks explicitly; only unresolved questions about current behavior belong among new model-checkable candidates. See `bug-archaeology.md` § 1.4 and § 6.1 above.

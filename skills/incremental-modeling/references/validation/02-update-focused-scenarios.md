@@ -33,9 +33,9 @@ Do not force an implementation sequence that cannot occur through normal APIs me
 
 ## 3. Category-Specific Trace Quality
 
-For Category A, preserve the real linear event order and collect the message/state fields needed to distinguish the changed path.
+Add workloads (`harness/workloads.py`) that reach the changed handlers through the public API, sequentially and concurrently, and extend `harness/mapping.toml` for new routes and statements.
 
-For Category B, follow the installed **harness-generation** timebox method: per-thread writers, tight real intervals, post-state capture outside the interval, preprocessing, and genuine cross-thread overlap. The target interaction is a partial-order constraint, not an artificial total order.
+For a changed interaction between requests, use `Client.together` so the requests' statements overlap, and repeat until the coverage gate reports overlapping actors for that scenario. The target interaction is a partial-order constraint, not an artificial total order.
 
 ## 4. Coverage Gate
 
@@ -45,6 +45,6 @@ Before trace validation:
 - every high-risk producer/consumer/fault interaction appears in at least one scenario;
 - mandatory update fields are present and non-vacuous;
 - prior regression scenarios still have explicit fresh-run outcomes;
-- Category B has genuine overlap and contention rather than serialized traces.
+- Concurrent scenarios have genuine overlap (the coverage gate passes) rather than serialized traces.
 
 Record uncovered Actions as validation gaps. Do not count a scenario name, test file, or empty trace as coverage.

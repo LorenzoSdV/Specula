@@ -1,13 +1,7 @@
 # Common Deep Analysis Methodology
 
-This file contains the **shared** workflow for deep analysis.
-
-After classifying the target, read the matching category-specific reference:
-
-- `distributed-analysis.md` for **Category A (Distributed / Message-Passing)**
-- `concurrent-analysis.md` for **Category B (Concurrent / Lock-Free / Runtime)**
-
-Use this file for the common verification discipline and analysis process that applies to both categories.
+This file contains the **shared** workflow for deep analysis. The web-specific patterns, invariant
+families and fault model are in `web-analysis.md`; read it first.
 
 ---
 
@@ -21,7 +15,10 @@ For each major operation, determine:
 - what can be interleaved by concurrent operations or crash?
 - what ordering dependencies exist between steps?
 
-This directly informs how to split (or not split) TLA+ actions. In distributed systems, the boundary is typically a persistence call or message send. In concurrent systems, it is typically a CAS, store-release, or fence.
+This directly informs how to split (or not split) TLA+ actions. In a web app the boundary is each
+SQL statement or other awaited I/O (cache, queue, external API): other requests run between any two
+of them, inside a transaction or not. The isolation level decides only what each statement sees and
+when it waits or fails. In-process state with no I/O between two `await`s is the rare exception.
 
 ### 1.2 Code Path Inconsistency
 
@@ -32,10 +29,9 @@ This directly informs how to split (or not split) TLA+ actions. In distributed s
 2. For each, list what checks and state updates are performed
 3. Find paths that are missing checks or updates present in others
 
-This pattern matters in both categories:
-
-- distributed: one RPC path checks term, another skips it
-- concurrent: one fast path re-checks a cached snapshot, another slow path skips it
+Typical web forms: the REST handler checks ownership but the GraphQL mutation does not; checkout
+locks the row but the admin edit does not; the webhook handler and the redirect handler both mark an
+order paid, with different guards.
 
 ### 1.3 Developer Signals
 
@@ -110,7 +106,7 @@ Assess whether the issue can be triggered in practice:
 
 For each core file, read it **in full** using the `Read` tool. Do not skim.
 
-Which files count as “core” depends on the category-specific reference file.
+The core files are the handlers, services, models and middleware on the paths in the write matrix (`web-analysis.md`), plus the schema and migrations.
 
 ### 3.2 Parallelization
 

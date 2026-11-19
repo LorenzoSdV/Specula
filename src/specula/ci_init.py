@@ -168,8 +168,10 @@ def register_baseline(
         "spec/MC.tla",
         "spec/MC.cfg",
         "spec/Trace.tla",
-        "spec/Trace.cfg",
+        "spec/Trace.cfg.tmpl",
         "spec/instrumentation-spec.md",
+        "stack/stack.toml",
+        "harness/mapping.toml",
         "harness/run.sh",
     )
     record = {

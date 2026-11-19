@@ -478,6 +478,10 @@ class TestPipeline(unittest.TestCase):
         os.chdir(self.tmp)
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.addCleanup(os.chdir, self._old)
+        for method in ("ensure_stacks", "stop_stacks"):  # phases are stubbed: no app to stack up
+            patcher = mock.patch.object(PL.Pipeline, method, lambda *_args, **_kwargs: None)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def run_main(self, argv: list[str], *, repair: bool = False) -> list[tuple[str, list[str]]]:
         p = PL.Pipeline()

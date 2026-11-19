@@ -93,6 +93,12 @@ class TmpCwd(unittest.TestCase):
         os.chdir(self.tmp)
         self.addCleanup(self._td.cleanup)
         self.addCleanup(os.chdir, self._old_cwd)
+        # Orchestration tests stub the phases, so there is no app to stack up; the stack step has
+        # its own tests (TestStackStep).
+        for method in ("ensure_stacks", "stop_stacks"):
+            patcher = mock.patch.object(pl.Pipeline, method, lambda *_args, **_kwargs: None)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
 
 # ──────────────────────────────────────────────────────────

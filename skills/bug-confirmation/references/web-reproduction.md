@@ -1,14 +1,14 @@
-# Reproducing findings in web applications (Category W)
+# Reproducing findings in web applications
 
-Use this reference when the modeling brief says the target is **Category W** (web / request-concurrent):
-HTTP request handlers over a shared database, modelled on the `WebDB.tla` library. Everything in
+Every target is a web application: HTTP request handlers (and jobs, webhooks) over a shared database,
+modeled on the `WebDB.tla` library. Everything in
 `guide.md`, `phases/01-investigation.md` and `phases/02-reproduction.md` still applies, including the
 verdict table, the confirmation bar, the prohibited shortcuts and the evidence requirements. This file
 says how to meet them for a web app.
 
-The web toolkit (`webkit/`) and the target's tracing stack are named in the Target-Specific
-Instructions. All tools below are generic: they need only the target's model, mapping file and stack
-config.
+The web toolkit and the target's tracing stack are named in the prompt's "Web toolkit and tracing
+stack" section, with the exact `wkstack.py` options to use. All tools below are generic: they need only
+the target's model, mapping file and stack config. The seeded accounts are in the modeling brief.
 
 ## What "a real trigger" means for a web app
 
@@ -45,25 +45,26 @@ Walk it strictly in order, as in `phases/02-reproduction.md`.
 
 1. **Schedule** from the counterexample (run from the spec directory):
 
-       python3 <webkit>/repro/schedule_from_tlc.py --spec MC.tla --config <hunt cfg> \
+       python3 <toolkit>/repro/schedule_from_tlc.py --spec MC.tla --config <hunt cfg> \
            --invariant <Invariant> --out <fdir>/schedule.json
 
    It prints the counterexample as a per-request timeline (reads, lock waits, what each COMMIT changed)
    and writes the order of SQL statement starts plus each actor's inputs.
 2. **Repro test** `repro/test_bug<ID>_<name>.py`: start the stack if it is not running
-   (`<webkit>/stack/wkstack.py up --config <stack config>`), reset the database with the app's own seed
-   command, build each actor's HTTP request from `schedule["inputs"][actor]`, and call
-   `scheduler.replay(schedule, send)` from `<webkit>/repro/scheduler.py`. `send(actor, traceparent)` must
+   (`wkstack.py ensure` with the prompt's options), reset the database with `wkstack.py reset`, build
+   each actor's HTTP request from `schedule["inputs"][actor]`, and call
+   `scheduler.replay(schedule, send)` from `<toolkit>/repro/scheduler.py`. `send(actor, traceparent)` must
    pass the given `traceparent` header on that actor's request, which is how the proxy tells requests apart.
-   A complete example for one app: `eval/seeded-shop/repro/test_bug1_oversell.py` in the toolkit repository.
+   `base_url` and `control_url` are in `stack/state.json`; the replay's recordings land in the current
+   recordings directory (`out_dir`).
 3. **Consequence through a public read path**: after the replay, read the affected state the way a
    user or client would (an API GET, a page, an email in the stack's mail catcher), and print it. That
    is the "real consumer observes a wrong outcome" of the confirmation bar. Database contents alone
    are not enough.
-4. **Same bug**: build the run's own trace with `<webkit>/tracebuilder/build.py` for the replay window,
+4. **Same bug**: build the run's own trace with `<toolkit>/tracebuilder/build.py` for the replay window,
    then check it:
 
-       python3 <webkit>/tracecheck/check.py --spec <trace spec> --template <trace cfg template> \
+       python3 <toolkit>/tracecheck/check.py --spec <trace spec> --template <trace cfg template> \
            --violates <Invariant> --invariants-module <module> <trace>
 
    `REPRODUCED` there means the model matches the whole recorded run and that run ends violating the

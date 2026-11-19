@@ -1,6 +1,6 @@
 ---
 name: harness-generation
-description: "Trace harness generation (Phase 2.5). Use when: (1) instrumenting a system's source code to emit NDJSON traces for TLA+ trace validation, (2) writing test scenarios that exercise protocol code paths, (3) producing the first batch of traces from instrumented tests."
+description: "Trace harness generation (Phase 2.5) for a web application. Use when: (1) mapping recorded HTTP requests and SQL statements to model actions, (2) writing workloads that drive the app through its API, sequentially and concurrently, (3) recording traces through the tracing stack and passing the coverage gate."
 ---
 
 Read `guide.md` for the full workflow methodology.

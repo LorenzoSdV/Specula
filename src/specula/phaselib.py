@@ -40,7 +40,7 @@ if __package__ in (None, ""):
     sys.modules["specula.phaselib"] = sys.modules[__name__]
 import specula.progress as progress
 from specula import brief as modeling_brief
-from specula import quota, resumelib, tlc_tasks
+from specula import quota, resumelib, stacklib, tlc_tasks
 from specula.adapters.utils.policy import POLICY_BLOCKED_RC
 from specula.adapters.utils.transient import AUTH_REFRESH_FAILURE_RC, TRANSIENT_FAILURE_RC
 from specula.agent_config import codex_profile_name_error
@@ -821,7 +821,11 @@ class Phase:
         return ""
 
     def _read_prompt_extra(self, ws: Workspace, name: str) -> str:
-        """Return run-frozen guidance so manual supplements do not invalidate caches."""
+        """The web toolkit/stack section, then run-frozen guidance (frozen so manual supplements
+        do not invalidate caches; the stack section is static per target)."""
+        return stacklib.prompt_section(ws.work_dir(name)) + self._read_guidance(ws, name)
+
+    def _read_guidance(self, ws: Workspace, name: str) -> str:
         if ws.run_dir is None:
             return self._latest_prompt_extra(ws, name)
         frozen = ws.work_dir(name) / ".prompt-extra.initial.md"
@@ -2033,6 +2037,25 @@ def run_agent_blocking(
             return rc, text
 
 
+def _gate_failures(label: str, ws: Workspace, names: list[str], check: Any, dry_run: bool) -> list[tuple[str, int]]:
+    """Run a deterministic per-target output gate (stacklib); print and fail targets with problems."""
+    if dry_run:
+        return []
+    failures: list[tuple[str, int]] = []
+    for name in names:
+        try:
+            problems = check(ws.work_dir(name))
+        except stacklib.StackError as exc:
+            problems = [str(exc)]
+        if problems:
+            print()
+            print(f"{label} gate FAILED for {name}:")
+            for problem in problems:
+                print("  - " + problem.replace("\n", "\n    "))
+            failures.append((name, 1))
+    return failures
+
+
 class CodeAnalysisPhase(Phase):
     key = "code_analysis"
     next_phase_key = "spec_generation"
@@ -2129,7 +2152,7 @@ You are analyzing the following system:
 
 ## Instructions
 
-Use the installed Specula skill {prompt_skill_ids("code-analysis")}. Read it in full and follow it exactly — it is the single source of methodology (its 4 phases, references, rules, Scenario modeling-brief format, and Category A/B handling).
+Use the installed Specula skill {prompt_skill_ids("code-analysis")}. Read it in full and follow it exactly — it is the single source of methodology (its phases, references, rules, the Scenario modeling-brief format, and the stack config).
 
 Do everything the skill specifies. Do not add, relax, or override any step here. Scale the work to the requested scope; the skill sets no fixed counts or document-size targets.
 
@@ -2139,6 +2162,8 @@ Write your outputs to:
 - `{work_dir}/modeling-brief.md` — The primary deliverable (handoff to Spec Generation)
 - `{work_dir}/defect-ledger.json` — The brief's defect ledger (§ 6.2) in JSON (handoff to Bug Confirmation)
 - `{work_dir}/analysis-report.md` — Detailed audit trail of all findings
+- `{stacklib.config_path(work_dir)}` — Stack config for the app's tracing stack, validated with
+  `wkstack.py ensure` (self-test PASS) as the skill describes
 """
         prompt += notes_section(work_dir, first=True)
         return self._with_extra(ws, name, prompt)
@@ -2217,6 +2242,12 @@ Prerequisites:
             else:
                 line = f"  {name:<20} MISSING modeling-brief.md"
                 ok = False
+            if byom_path is None:
+                if stacklib.config_path(ws.work_dir(name)).is_file():
+                    line += "  stack.toml OK"
+                else:
+                    line += "  stack.toml MISSING"
+                    ok = False
             line += "  repo OK" if repo_dir else "  repo MISSING"
             if not repo_dir:
                 ok = False
@@ -2264,7 +2295,7 @@ You are generating a TLA+ specification for: **{name}**
 
 ## Instructions
 
-Use the installed Specula skill {prompt_skill_ids("spec-generation")}. Read it in full and follow it exactly — it is the single source of methodology (its phases, references, rules, Category A/B handling, and the mandatory brief-coverage self-audit).
+Use the installed Specula skill {prompt_skill_ids("spec-generation")}. Read it in full and follow it exactly — it is the single source of methodology (its phases, references, rules, the WebDB modeling rules, and the mandatory brief-coverage self-audit).
 
 Do everything the skill specifies. Do not add, relax, or override any step here. Scale the work to the requested scope; the skill sets no fixed counts or document-size targets.
 
@@ -2274,14 +2305,13 @@ Create the output directory and write all files to:
   {spec_dir}/
 
 Expected files:
-- `{spec_dir}/base.tla` — Base specification
-- `{spec_dir}/base.cfg` — Base config
-- `{spec_dir}/MC.tla` — Model checking specification
-- `{spec_dir}/MC.cfg` — Model checking config
+- `{spec_dir}/<App>.tla`, `{spec_dir}/<App>Invariants.tla` — The model on WebDB, and its invariants
+- `{spec_dir}/base.tla` — `EXTENDS <App>`
+- `{spec_dir}/MC.tla`, `{spec_dir}/MC.cfg`, `{spec_dir}/MC_hunt_<scenario>.cfg` — Model checking
 - `{spec_dir}/brief-coverage.md` — Coverage audit mapping the requested scope and brief §2/§5/§6.1 to hunt cfgs and invariants
-- `{spec_dir}/Trace.tla` — Trace validation specification
-- `{spec_dir}/Trace.cfg` — Trace validation config
-- `{spec_dir}/instrumentation-spec.md` — Instrumentation mapping
+- `{spec_dir}/Trace<App>.tla`, `{spec_dir}/Trace.tla`, `{spec_dir}/Trace.cfg.tmpl` — Trace validation
+- `{spec_dir}/WebDB.tla`, `{spec_dir}/WebTrace.tla` — Copied unchanged from the toolkit
+- `{spec_dir}/instrumentation-spec.md` — Each action's route or SQL statement shape
 """
         prompt += notes_section(wd, first=False)
         return self._with_extra(ws, name, prompt)
@@ -2314,6 +2344,11 @@ Expected files:
             else:
                 print(f"  --  {name} (no output)")
 
+    def finalize_outputs(
+        self, ws: Workspace, names: list[str], *, adapter: Path, dry_run: bool
+    ) -> list[tuple[str, int]]:
+        return _gate_failures("Shared-library", ws, names, stacklib.library_problems, dry_run)
+
     def monitor_line(self, ws: Workspace) -> str | None:
         return self._monitor(ws, "spec-gen.log", "  Monitor: tail -f */.specula-output/spec-gen.log")
 
@@ -2324,7 +2359,9 @@ class HarnessGenerationPhase(Phase):
     title = "Specula — Harness Generation (Phase 2.5)"
     usage = r"""
 Batch launcher: spawn one agent per target system for harness generation (Phase 2.5).
-Each agent instruments the source code and collects NDJSON traces for spec validation.
+Each agent configures boundary tracing for the web app (mapping file), writes workloads, and
+records traces through the tracing stack. A deterministic gate then checks that every trace was
+recorded by a self-tested stack, rebuilds identically from the recordings, and covers the model.
 
 Usage:
   specula harness [options] "name" [...]
@@ -2350,7 +2387,8 @@ Options:
 
 Prerequisites:
   - Selected agent CLI installed and authenticated
-  - Phase 2 complete: spec/base.tla, spec/Trace.tla, spec/instrumentation-spec.md
+  - Phase 2 complete: spec/base.tla, spec/Trace.tla, spec/Trace.cfg.tmpl, spec/instrumentation-spec.md
+  - Phase 1's stack config: stack/stack.toml (the pipeline starts and self-tests the stack)
   - Source repo at <name>/artifact/<repo>/ or specified via --artifact
 
 """
@@ -2364,7 +2402,7 @@ Prerequisites:
             spec_dir = ws.work_dir(name) / "spec"
             repo_dir = ws.find_repo_dir(name)
             line = f"  {name:<20}"
-            if (spec_dir / "base.tla").is_file() and (spec_dir / "Trace.tla").is_file():
+            if all((spec_dir / f).is_file() for f in ("base.tla", "Trace.tla", "Trace.cfg.tmpl")):
                 line += "specs OK"
             else:
                 line += "specs MISSING"
@@ -2373,6 +2411,11 @@ Prerequisites:
                 line += "  instr OK"
             else:
                 line += "  instr MISSING"
+                ok = False
+            if stacklib.config_path(ws.work_dir(name)).is_file():
+                line += "  stack.toml OK"
+            else:
+                line += "  stack.toml MISSING"
                 ok = False
             if byom_path is not None:
                 if (ws.work_dir(name) / "modeling-brief.md").is_file():
@@ -2417,32 +2460,36 @@ Combine those artifacts with the target-specific instructions below. Reuse suppl
             return self._with_extra(ws, name, prompt)
         prompt = f"""# Trace Harness Generation Task: {name}
 
-You are generating a trace harness for **{name}** — instrumenting the real source code to produce NDJSON traces for TLA+ trace validation.
+You are configuring boundary tracing for the web application **{name}** and recording traces of
+its real behavior through the tracing stack, for TLA+ trace validation. No source instrumentation.
 
 ## Inputs
 
 - **Instrumentation spec**: {spec_dir}/instrumentation-spec.md
-- **Trace spec**: {spec_dir}/Trace.tla + {spec_dir}/Trace.cfg
-- **Base spec**: {spec_dir}/base.tla (for understanding spec actions)
+- **Trace spec**: {spec_dir}/Trace.tla + {spec_dir}/Trace.cfg.tmpl
+- **Model**: {spec_dir}/base.tla and the modules it extends
+- **Stack config**: {stacklib.config_path(wd)} (the stack is already running and self-tested)
 - **Source code**: {repo_dir}
 
 ## Workflow
 
-Use the installed Specula skill {prompt_skill_ids("harness-generation")}. Read it in full and follow it exactly — it is the single source of methodology (instrument real code, trace format, run.sh, end-to-end validation).
+Use the installed Specula skill {prompt_skill_ids("harness-generation")}. Read it in full and follow it exactly — it is the single source of methodology (mapping file, workloads, coverage gate, run.sh).
 
 Do everything the skill specifies. Do not add, relax, or override any step here. Scale the work to the requested scope; the skill sets no fixed counts or document-size targets.
 
 ## Output
 
-Write all harness files to: {wd}/harness/
-Collect traces to: {wd}/traces/
-
 Expected outputs:
-- `{wd}/harness/src/` — Trace emission module + test scenarios
-- `{wd}/harness/apply.sh` — Apply instrumentation to artifact
-- `{wd}/harness/run.sh` — One-command build + run + collect traces
-- `{wd}/harness/INSTRUMENTATION.md` — Guide for Phase 3 agent to adjust instrumentation
-- `{wd}/traces/*.ndjson` — Trace files from test runs
+- `{wd}/harness/mapping.toml` — Routes and SQL statement shapes → model action names
+- `{wd}/harness/workloads.py` — Scenarios for the toolkit's workload runner
+- `{wd}/harness/run.sh`, `{wd}/harness/rebuild_traces.sh` — Record traces; rebuild them after a mapping change
+- `{wd}/harness/INSTRUMENTATION.md` — What is captured and how to change it
+- `{wd}/traces/*.ndjson`, `{wd}/traces/windows.json` — Traces recorded by the runner
+
+When the agent exits, the orchestrator checks deterministically that every trace was recorded by a
+self-tested stack running the current stack config, that rebuilding the traces from the recordings
+with `harness/mapping.toml` reproduces them exactly, and that the coverage gate passes. Run those
+checks yourself before you finish: `python3 {SPECULA_ROOT}/src/specula/stacklib.py gate {wd}`.
 """
         prompt += notes_section(wd, first=False)
         return self._with_extra(ws, name, prompt)
@@ -2456,17 +2503,30 @@ Expected outputs:
             wd = ws.work_dir(name)
             harness_dir = wd / "harness"
             traces_dir = wd / "traces"
-            has_run = (harness_dir / "run.sh").is_file()
-            has_guide = (harness_dir / "INSTRUMENTATION.md").is_file()
-            trace_count = len(list(traces_dir.rglob("*.ndjson"))) if traces_dir.is_dir() else 0
-            if has_run and trace_count > 0:
-                print(f"  OK  {name} -> run.sh: yes, traces: {trace_count}")
-                if not has_guide:
-                    print("        warning: missing INSTRUMENTATION.md")
-            elif has_run:
-                print(f"  ~~  {name} -> run.sh: yes, traces: 0 (no traces generated)")
+            has_mapping = (harness_dir / "mapping.toml").is_file()
+            trace_count = len(list(traces_dir.glob("*.ndjson"))) if traces_dir.is_dir() else 0
+            coverage = ""
+            try:
+                report = json.loads((harness_dir / "coverage.json").read_text())
+                seen = sum(1 for n in report.get("actions", {}).values() if n)
+                coverage = f", coverage: {seen}/{len(report.get('actions', {}))} actions" + (
+                    "" if report.get("ok") else " (gate FAILED)"
+                )
+            except (OSError, json.JSONDecodeError, AttributeError):
+                pass
+            if has_mapping and trace_count > 0:
+                print(f"  OK  {name} -> mapping: yes, traces: {trace_count}{coverage}")
+            elif has_mapping:
+                print(f"  ~~  {name} -> mapping: yes, traces: 0 (no traces recorded)")
             else:
                 print(f"  --  {name} (no harness output)")
+
+    def finalize_outputs(
+        self, ws: Workspace, names: list[str], *, adapter: Path, dry_run: bool
+    ) -> list[tuple[str, int]]:
+        return _gate_failures(
+            "Harness", ws, names, lambda wd: stacklib.library_problems(wd) + stacklib.trace_problems(wd), dry_run
+        )
 
     def monitor_line(self, ws: Workspace) -> str | None:
         return self._monitor(ws, "harness-gen.log", "  Monitor: tail -f */.specula-output/harness-gen.log")
@@ -2849,10 +2909,11 @@ You are validating the TLA+ specification for **{name}** through iterative trace
 ## Inputs
 
 - **Spec directory**: {spec_dir}
-  - base.tla, base.cfg — Base specification
-  - MC.tla, MC.cfg — Model checking specification
-  - Trace.tla, Trace.cfg — Trace validation specification
-  - instrumentation-spec.md — Action-to-code mapping for harness generation
+  - base.tla and the model it extends (on the shared WebDB.tla module)
+  - MC.tla, MC.cfg, MC_hunt_*.cfg — Model checking
+  - Trace.tla, Trace.cfg.tmpl — Trace validation (existential, with the toolkit's trace checker)
+  - instrumentation-spec.md — Action-to-route/SQL mapping
+- **Harness**: {wd}/harness/ (mapping.toml, rebuild_traces.sh) and traces in {wd}/traces/
 - **Source code**: {repo_dir}
 - **Modeling brief**: {wd}/modeling-brief.md
 
@@ -2878,6 +2939,11 @@ Do everything the skill specifies. Do not add, relax, or override any step here.
                 print(f"  {name}: changelog empty (check log)")
             else:
                 print(f"  {name}: no changelog (check log)")
+
+    def finalize_outputs(
+        self, ws: Workspace, names: list[str], *, adapter: Path, dry_run: bool
+    ) -> list[tuple[str, int]]:
+        return _gate_failures("Shared-library", ws, names, stacklib.library_problems, dry_run)
 
     def monitor_line(self, ws: Workspace) -> str | None:
         # bash uses an absolute ${PWD} path and always spec-validation.log (even
@@ -3849,7 +3915,7 @@ Review the generated TLA+ specs for correctness and completeness.
 - MC Spec: {spec_dir}/MC.tla
 - MC Config: {spec_dir}/MC.cfg
 - Trace Spec: {spec_dir}/Trace.tla
-- Trace Config: {spec_dir}/Trace.cfg
+- Trace Config Template: {spec_dir}/Trace.cfg.tmpl
 - Instrumentation: {spec_dir}/instrumentation-spec.md
 - Modeling Brief (reference): {wd}/modeling-brief.md
 - Coverage Audit: {spec_dir}/brief-coverage.md

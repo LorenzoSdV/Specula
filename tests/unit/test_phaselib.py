@@ -60,6 +60,13 @@ from specula.skill_refs import CODEX_PLUGIN_NAME, prompt_skill_ids  # noqa: E402
 NAME = "footest"
 
 
+
+# Fake agents also write the web outputs their phase must produce (stub toolkit's fixture helper),
+# whenever they exit; the adapter's own exit status is kept.
+WEB_FIXTURE = (
+    "trap 'python3 \"$SPECULA_WEBKIT/fixture.py\" \"${SPECULA_PHASE:-none}\" \"${SPECULA_WORK_DIR:-.}\"' EXIT\n"
+)
+
 class PhaseSpec(TypedDict):
     key: str
     artifact: bool  # whether the phase accepts --artifact (bug_classification does not)
@@ -92,7 +99,7 @@ PHASES: list[PhaseSpec] = [
     {
         "key": "spec_generation",
         "artifact": True,
-        "inputs": ["modeling-brief.md"],
+        "inputs": ["modeling-brief.md", "stack/stack.toml"],
         "fail": "Run code analysis first.",
         "ok": "All prerequisites OK.",
         "log": "spec-gen.log",
@@ -104,7 +111,13 @@ PHASES: list[PhaseSpec] = [
     {
         "key": "harness_generation",
         "artifact": True,
-        "inputs": ["spec/base.tla", "spec/Trace.tla", "spec/instrumentation-spec.md"],
+        "inputs": [
+            "spec/base.tla",
+            "spec/Trace.tla",
+            "spec/Trace.cfg.tmpl",
+            "spec/instrumentation-spec.md",
+            "stack/stack.toml",
+        ],
         "fail": "Run spec generation (Phase 2) first.",
         "ok": "All prerequisites OK.",
         "log": "harness-gen.log",
@@ -910,7 +923,7 @@ class TestRulePinning(PhaseCase):
         self.set_env("COUNT_FILE", str(self.captures / "count"))
 
     def write_adapter(self, body: str) -> None:
-        self.adapter.write_text("#!/usr/bin/env sh\nset -eu\n" + self.RECORDING_ADAPTER + body)
+        self.adapter.write_text("#!/usr/bin/env sh\nset -eu\n" + WEB_FIXTURE + self.RECORDING_ADAPTER + body)
         self.adapter.chmod(0o755)
 
     def artifact_flag(self) -> str:
@@ -1344,7 +1357,7 @@ class TestHandoffGate(PhaseCase):
         self.adapter = adapters / "fake.sh"
 
     def write_adapter(self, body: str) -> None:
-        self.adapter.write_text("#!/usr/bin/env sh\nset -eu\n" + body)
+        self.adapter.write_text("#!/usr/bin/env sh\nset -eu\n" + WEB_FIXTURE + body)
         self.adapter.chmod(0o755)
 
     def run_analysis(
@@ -2021,7 +2034,7 @@ class TestBugClassificationOutputs(PhaseCase):
         (self.work_dir() / "confirmed-bugs.md").write_text(self.CONFIRMED)
 
     def write_adapter(self, body: str) -> None:
-        self.adapter.write_text("#!/usr/bin/env sh\nset -eu\n" + body)
+        self.adapter.write_text("#!/usr/bin/env sh\nset -eu\n" + WEB_FIXTURE + body)
         self.adapter.chmod(0o755)
 
     @staticmethod
@@ -2451,7 +2464,7 @@ class TestLegacyRepairIdentityFinalization(PhaseCase):
         self.adapter = adapters / "fake.sh"
         self.adapter.write_text(
             "#!/usr/bin/env sh\n"
-            "set -eu\n"
+            "set -eu\n" + WEB_FIXTURE + ""
             'cp "$LEGACY_REPORT_FIXTURE" "$SPECULA_WORK_DIR/confirmed-bugs.md"\n'
             'if [ "${LEGACY_NO_RR:-0}" != 1 ]; then\n'
             '  mkdir -p "$SPECULA_WORK_DIR/spec/repair-requests"\n'
@@ -3046,7 +3059,7 @@ class TestRunAgentBlocking(PhaseCase):
         captures = self.tmp()
         adapter.write_text(
             "#!/bin/sh\n"
-            "set -eu\n"
+            "set -eu\n" + WEB_FIXTURE + ""
             'printf x >> "$COUNT_FILE"\n'
             'attempt=$(wc -c < "$COUNT_FILE")\n'
             'for arg do case "$arg" in '
@@ -3142,7 +3155,7 @@ class TestRunAgentBlocking(PhaseCase):
         captures = self.tmp()
         adapter.write_text(
             "#!/bin/sh\n"
-            "set -eu\n"
+            "set -eu\n" + WEB_FIXTURE + ""
             'printf x >> "$COUNT_FILE"\n'
             'attempt=$(wc -c < "$COUNT_FILE")\n'
             'for arg do case "$arg" in '
@@ -3217,7 +3230,7 @@ class TestRunAgentBlocking(PhaseCase):
         captures = self.tmp()
         adapter.write_text(
             "#!/bin/sh\n"
-            "set -eu\n"
+            "set -eu\n" + WEB_FIXTURE + ""
             'printf x >> "$COUNT_FILE"\n'
             'attempt=$(wc -c < "$COUNT_FILE")\n'
             'for arg do case "$arg" in '
@@ -3557,7 +3570,7 @@ class TestProgressReporting(PhaseCase):
         self.adapter = adapters / "fake.sh"
 
     def write_adapter(self, body: str) -> None:
-        self.adapter.write_text("#!/usr/bin/env sh\nset -eu\n" + body)
+        self.adapter.write_text("#!/usr/bin/env sh\nset -eu\n" + WEB_FIXTURE + body)
         self.adapter.chmod(0o755)
 
     def run_fake(self) -> tuple[int, str]:
@@ -4308,10 +4321,14 @@ class TestSummarize(PhaseCase):
             "want": [f"~~  {NAME} -> 1/4 files (incomplete)", "missing: base.tla"],
         },
         {
-            "name": "harness_generation/run+traces",
+            "name": "harness_generation/mapping+traces",
             "phase": "harness_generation",
-            "files": {"harness/run.sh": "#!/bin/sh\n", "traces/t1.ndjson": "{}\n"},
-            "want": [f"OK  {NAME} -> run.sh: yes, traces: 1", "warning: missing INSTRUMENTATION.md"],
+            "files": {
+                "harness/mapping.toml": "# m\n",
+                "traces/t1.ndjson": "{}\n",
+                "harness/coverage.json": '{"ok": true, "actions": {"A": 1, "B": 0}}',
+            },
+            "want": [f"OK  {NAME} -> mapping: yes, traces: 1, coverage: 1/2 actions"],
         },
         {
             "name": "harness_generation/none",
@@ -4597,7 +4614,7 @@ class TestReviewPhase(PhaseCase):
         adapters.mkdir()
         self.patch_attr(phaselib, "LAUNCH_DIR", adapters.parent)
         adapter = adapters / f"{name}.sh"
-        adapter.write_text("#!/usr/bin/env sh\nset -eu\n" + body)
+        adapter.write_text("#!/usr/bin/env sh\nset -eu\n" + WEB_FIXTURE + body)
         adapter.chmod(0o755)
         return adapter
 

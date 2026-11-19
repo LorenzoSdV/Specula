@@ -79,6 +79,13 @@ ALL_PHASE_SKIPS = (
 )
 
 
+def seed_web_outputs(phase: str, work_dir: Path) -> None:
+    """Write the web outputs a fake agent would produce for `phase` (stub toolkit's fixture helper)."""
+    subprocess.run(
+        [sys.executable, str(Path(os.environ["SPECULA_WEBKIT"]) / "fixture.py"), phase, str(work_dir)], check=True
+    )
+
+
 class CliE2E(unittest.TestCase):
     def specroot(self, case_dirs: tuple[str, ...] = ("footest",)) -> Path:
         """A minimal hermetic copy of the repo: the package (so intra-package
@@ -282,6 +289,7 @@ class CliE2E(unittest.TestCase):
             "    ;;\n"
             "  *) exit 97 ;;\n"
             "esac\n"
+            'python3 "$SPECULA_WEBKIT/fixture.py" "$SPECULA_PHASE" "$SPECULA_WORK_DIR"\n'
             'if [ -n "$log" ]; then printf "fixture completed\\n" > "$log"; fi\n'
         )
         adapter.chmod(0o755)
@@ -476,6 +484,7 @@ class CliE2E(unittest.TestCase):
             "    ;;\n"
             "  *) exit 97 ;;\n"
             "esac\n"
+            'python3 "$SPECULA_WEBKIT/fixture.py" "$SPECULA_PHASE" "$SPECULA_WORK_DIR"\n'
         )
         adapter.chmod(0o755)
 
@@ -620,6 +629,7 @@ class CliE2E(unittest.TestCase):
             path = wd / rel
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("seeded\n")
+        seed_web_outputs("spec_generation", wd)
 
         first = self.run_cli(
             root,

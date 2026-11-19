@@ -1,0 +1,3 @@
+---- MODULE WebTrace ----
+\* test stub
+====

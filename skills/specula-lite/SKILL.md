@@ -1,6 +1,6 @@
 ---
 name: specula-lite
-description: Find bugs in concurrent or distributed code using TLA+ modeling, model checking, and code-level reproduction. Use for a focused investigation with one coding agent, without trace validation or the full Specula pipeline.
+description: Find interleaving bugs in web applications (concurrent requests, retries, jobs and webhooks over a shared database) using TLA+ modeling on the WebDB module, model checking, and reproduction against the running app. Use for a focused investigation with one coding agent, without trace validation or the full Specula pipeline.
 ---
 
 # Specula Lite
@@ -39,7 +39,7 @@ Read the bundled guides as methodology, in the sequence below. `guides` is the d
 
 ## Investigation
 
-1. **Analyze the code.** Read `code_analysis/guide.md`, then the references relevant to the target's distributed/concurrent/BFT category. Follow the user's scope, inspect relevant history and known reports, and write `modeling-brief.md` with mechanisms, source locations, proposed properties, assumptions, and exclusions. Apply the guide's investigative methods to this scope; repository-wide issue quotas are not prerequisites.
+1. **Analyze the code.** Read `code_analysis/guide.md` and its `references/web-analysis.md`. Follow the user's scope, inspect relevant history and known reports, and write `modeling-brief.md` with mechanisms, source locations, proposed properties, assumptions, and exclusions. Apply the guide's investigative methods to this scope; repository-wide issue quotas are not prerequisites.
 2. **Build the model.** Read `spec_generation/guide.md`, especially `references/base-spec-methodology.md`, `mc-spec-pattern.md`, and `brief-coverage-checklist.md`. Produce the base and model-checking modules/configurations, with source correspondence and a coverage audit of the chosen brief. Skip its trace and instrumentation outputs. Include implementation guards and atomicity boundaries, not just the reference algorithm.
 3. **Check and investigate counterexamples.** Read `tla-checking-workflow/guide.md`, especially its counterexample classifications, fidelity checklist, and TLC gotchas. Parse the model, check structural and substantive properties, then investigate the relevant fault/interleaving scenarios. Use actual tool results to distinguish property mismatch, model error, and a candidate implementation defect. A clean finite check only covers the recorded model/configuration; it does not certify the implementation.
 4. **Attempt reproduction.** Read `bug-confirmation/guide.md` and its investigation/reproduction phases. Handle candidates sequentially, including code-review candidates without a model counterexample. Establish reachable preconditions and observable harm in the real implementation. Execute tests and retain commands and outputs. When reproduction exposes a model artifact, correct the model and return to checking directly. A failure to reproduce alone does not establish that a candidate is false. If the user named a reproduction command, follow [delegated reproduction](#delegated-reproduction) instead.

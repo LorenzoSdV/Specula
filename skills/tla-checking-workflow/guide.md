@@ -63,8 +63,8 @@ These parameters apply to **all** model checking runs — convergence and bug hu
 |-----------|------|-------|
 | **Timeout** | **30 minutes** per run (`-t 30`) | The single hard constraint. If TLC hasn't found a violation in 30 min, the run ends. A safety run that reaches the timeout without a violation is a completed, budget-limited check: record its coverage (distinct states, depth, queue) and proceed; do not describe it as exhaustive. |
 | **Workers** | Prefer `-w auto` for one TLC; use an explicit count when running several TLCs concurrently | `auto` uses every CPU visible to that JVM. It does not coordinate with other TLC processes. |
-| **Heap memory** | Choose together with off-heap (e.g., `-m 50G`) | The wrapper accounts for the declared heap and off-heap as one request. |
-| **Off-heap memory** | Give `OffHeapDiskFPSet` the larger share when useful (e.g., `-M 200G`) | The sum of `-m + -M` must fit the remaining Specula-run budget. |
+| **Heap memory** | Default: a quarter of physical memory (`-m` to override) | The wrapper accounts for the declared heap and off-heap as one request. |
+| **Off-heap memory** | Default: a quarter of physical memory (`-M` to override) | The sum of `-m + -M` must fit the remaining Specula-run budget; do not request more than the machine has. |
 | **Simulation depth** | Enough transitions to reach and exercise the target interactions | Values such as `-p 50` or `-p 100` suit some small protocols; longer lifecycles may require substantially greater depth. |
 | **Simulation traces** | As many as possible (`-n 999999999`) | Let the timeout be the stopping condition, not trace count. |
 | **State space size** | **Do not constrain.** | Let TLC explore as much as possible within the 30-min window. |
@@ -74,13 +74,13 @@ These parameters apply to **all** model checking runs — convergence and bug hu
 **Common run script options**:
 | Flag | Purpose | Example |
 |------|---------|---------|
-| `-s` | Spec file | `-s MCetcdraft.tla` |
-| `-c` | Config file | `-c MCetcdraft.cfg` |
+| `-s` | Spec file | `-s MC.tla` |
+| `-c` | Config file | `-c MC_hunt_two_buyers.cfg` |
 | `-S` | Simulation mode | `-S` |
 | `-n` | Number of simulation traces | `-n 999999999` |
 | `-p` | Simulation depth | `-p 100` |
-| `-m` | Heap memory | `-m 50G` |
-| `-M` | Off-heap memory | `-M 200G` |
+| `-m` | Heap memory | `-m 4G` |
+| `-M` | Off-heap memory | `-M 4G` |
 | `-w` | Worker threads | `-w auto` |
 | `-t` | Timeout (minutes) | `-t 30` |
 | `-j` | JSON trace dump file | `-j counterexample.json` |
@@ -117,7 +117,7 @@ This pipeline runs `claude --print` (non-interactive batch mode). The harness ex
   # start_background.sh prints the exact wait command, including --pid-file path. Use it.
   scripts/infra/wait_for_pid.sh --pid-file out.log.pid --timeout 40m --log out.log
   ```
-- ✅ **MCP tools are blocking and safe**: `get_tlc_summary`, `run_trace_validation`, etc. return when the work is done — use these in preference to manual polling whenever applicable.
+- ✅ **MCP tools are blocking and safe**: `get_tlc_summary`, `get_tlc_state`, etc. return when the work is done — use these in preference to manual polling whenever applicable.
 
 **Wrap any potentially-deadlocking command in `timeout`.** Concurrent test suites, build steps that take locks, network calls, anything that might hang under bug conditions — give it an outer `timeout N` so the agent isn't held hostage by a deadlock in the system under test:
 
@@ -163,6 +163,12 @@ compare_tlc_states       → diff last two states to see what transition trigger
 get_tlc_state (range)    → read the full trace for context
 ```
 
+For a web model, also render the counterexample as **request lanes**: rerun the cfg with `-j
+<out>.json` and run `python3 <toolkit>/timeline/timeline.py <out>.json --invariant <Invariant>`. It
+shows each request's route and statements in order, what each statement read, where a request waited
+on a row lock, and what each COMMIT changed: the interleaving that produces the violation, in the
+app's terms. It is also the skeleton of the reproduction schedule in bug confirmation.
+
 ### Step 2: Understand the Violated Property
 
 Read the invariant definition in the spec. Understand exactly what condition was violated and why the final state fails to satisfy it.
@@ -174,7 +180,9 @@ This is the most important step. Read the relevant implementation source code to
 - Does the spec correctly model the implementation's behavior?
 - Is the invariant capturing a genuine safety requirement?
 
-If the counterexample's preconditions look implausible in the real system (e.g., the violation requires a state combination you suspect the implementation prevents), run the procedure in `references/spec-fidelity-checklist.md` before classifying. The most common false positive is a Case C that's actually a Case B — the spec under-models a guard the implementation has.
+If the counterexample's preconditions look implausible in the real system (e.g., the violation requires a state combination you suspect the implementation prevents), run the procedure in `references/spec-fidelity-checklist.md` before classifying. The most common false positive is a Case C that's actually a Case B — the spec under-models a guard the implementation has. In web apps that guard is often outside the handler: a database constraint, a lock the ORM takes, middleware, a per-transaction isolation override (the checklist lists them).
+
+Concurrency between requests is normal operation: a counterexample that only needs two users, two tabs or a client retry at the same time is realistic. A guard that exists only in the browser is not a guard: a violation it would prevent is Case C, "reachable via the API".
 
 ### Step 4: Classify the Counterexample
 
@@ -248,9 +256,9 @@ When the standard tools don't provide enough detail, use `run_trace_replay` to r
 1. Define an ALIAS operator in the spec to expose computed expressions:
    ```tla
    DebugAlias == [
-     currentTerm |-> currentTerm,
-     state |-> state,
-     quorum |-> {Q \in SUBSET Server : IsQuorum(Q)}
+     pc |-> pc,
+     res |-> res,
+     committedHeld |-> [k \in CommittedKeys("Seat") |-> Committed("Seat", k).held]
    ]
    ```
 2. Add `ALIAS DebugAlias` to the config file
@@ -299,24 +307,24 @@ Returns: `violation_name`, `trace_length`, `actions`, `action_frequency`, `stati
 ```json
 {"file_path": "nohup.out", "index": -1}
 {"file_path": "nohup.out", "indices": "-3:"}
-{"file_path": "nohup.out", "index": "last", "path": "currentTerm.s1"}
-{"file_path": "nohup.out", "index": 5, "variables": ["currentTerm", "state"]}
+{"file_path": "nohup.out", "index": "last", "path": "pc.r1"}
+{"file_path": "nohup.out", "index": 5, "variables": ["pc", "res"]}
 ```
 
 ### compare_tlc_states
 ```json
 {"file_path": "nohup.out", "index1": -2, "index2": -1}
-{"file_path": "nohup.out", "track_variable": "currentTerm"}
-{"file_path": "nohup.out", "track_variable": "state", "track_path": "s1"}
+{"file_path": "nohup.out", "track_variable": "pc"}
+{"file_path": "nohup.out", "track_variable": "res", "track_path": "r1"}
 ```
 
 ### run_trace_replay
 ```json
 {
-  "spec_file": "MCetcdraft.tla",
+  "spec_file": "MC.tla",
   "trace_file": "counterexample.json",
   "work_dir": "/path/to/spec",
-  "config_file": "MCetcdraft.cfg",
+  "config_file": "MC_hunt_two_buyers.cfg",
   "trace_format": "json"
 }
 ```
@@ -325,10 +333,6 @@ Returns: `violation_name`, `trace_length`, `actions`, `action_frequency`, `stati
 
 ## Related Skills
 
-- **tla-trace-workflow** — Validates implementation traces against TLA+ specs (complementary to model checking)
+- **tla-trace-workflow** — Validates the model against recorded traces of the app (complementary to model checking)
 - **spec-generation** — Produces the TLA+ specs that this workflow checks
 - **code-analysis** — Analyzes system implementation to produce modeling briefs
-
-## Additional References
-
-For additional examples beyond the built-in ones, see the [Specula case-studies repository](https://github.com/specula-org/specula-case-studies) which contains 60+ completed case studies across distributed systems, consensus protocols, and concurrent data structures.

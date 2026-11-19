@@ -2,7 +2,7 @@
 
 Template for `spec/bug-report.md`, produced after spec convergence during bug hunting.
 
-See `../examples/cometbft-bug-report.md` for a complete real-world example.
+For each bug, include the counterexample as request lanes (from `<toolkit>/timeline/timeline.py`): each request's route, its statements in order, what each read, where it waited, and what each COMMIT changed.
 
 ## Template
 
@@ -25,7 +25,7 @@ See `../examples/cometbft-bug-report.md` for a complete real-world example.
 
 ### Trace Summary
 
-<Step-by-step description of the counterexample — what happens at each key state>
+<Step-by-step description of the counterexample: which request issues which statement, what it reads, where it waits, what commits — the timeline's request lanes>
 
 ### Root Cause
 

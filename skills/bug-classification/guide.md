@@ -29,10 +29,17 @@ Severity is a property of **what the defect does to the system**, not of how eas
 
 | Tier | When to assign |
 |---|---|
-| **Critical** | Externally observable corruption, crash, hang, or deadlock with persistent client-side impact and no automatic recovery. Examples: data inconsistency across replicas after a single fault, signature verification failure on legitimate input, election that elects two leaders, lost-wakeup deadlock under realistic concurrency. |
-| **High** | Externally observable but bounded harm OR internal invariant violation that demonstrably propagates to external effect. Examples: single failed response a client can retry, recoverable hang that times out, off-by-one that affects one slot/round, term-monotonicity break on crash-restart, missing leader check, missing quorum check, panic on attacker-controlled input. |
-| **Medium** | Internal invariant violation without a directly demonstrated external effect, but with downstream risk. Examples: commit idempotency missing (re-commit produces same result so no harm today, but future code change could expose), ordering non-determinism (HashMap iteration), cache freshness gap (downstream read might be stale under specific composition). |
-| **Low** | Hygiene / defensive coding gap / hardening recommendation. Examples: unused defensive guard, redundant lock, code-smell that the surrounding code already catches before any state escapes, deprecated path that is reachable but caught by a downstream guard. |
+| **Critical** | Irreversible or persistent harm that users or the business see, with no automatic recovery. Examples: a double charge or a capture without fulfillment; another tenant's or user's data in a response; privileges kept after revocation or a session alive after logout; oversell or double booking of a limited resource that support must resolve by hand; a coupon, credit or quota redeemed twice; an entity stuck permanently in a pending state. |
+| **High** | Observable but bounded or recoverable harm, OR an internal invariant violation that demonstrably reaches an external effect. Examples: a duplicate record a reconciliation job later cleans up; a duplicate email or webhook to a third party; recurring 500s or deadlock aborts under normal concurrency; a user locked out until an operator acts; an illegal status transition other code then acts on. |
+| **Medium** | Internal invariant violation without a demonstrated external effect, but with downstream risk. Examples: a derived counter that drifts from its source rows but nothing reads it yet; an idempotency record missing on a path whose retries are harmless today; stale UI state that a refresh corrects. |
+| **Low** | Hygiene / defensive gap / hardening recommendation. Examples: a redundant lock, an unused guard, a missing constraint behind a check the database already enforces another way, an error path that returns 500 instead of 400 on malformed input. |
+
+Write these factors explicitly in each Reasoning:
+
+- **Reversibility**: a sent email, a captured charge or a webhook a partner already received cannot be undone in the database.
+- **Blast radius**: only the triggering user, other users, or a whole tenant.
+- **Recovery**: self-heals (reconciliation job, provider retry), needs manual support or a data fix, or stays permanent.
+- **Trigger surface**: (a) an ordinary user by accident (double click, retry on a flaky network, two tabs); (b) any authenticated user on purpose through the API (a guard that exists only in the browser is no guard); (c) the system alone (cron overlap, provider retries, replicas). Record the minimal deployment profile the finding needs; a common production profile (for example two or more replicas) does not lower severity.
 
 When in doubt between two tiers, prefer the higher tier and explain the uncertainty in the Reasoning. The downstream submission filter will downgrade if needed; over-classification is recoverable, under-classification is not.
 
@@ -105,7 +112,7 @@ The Summary section at the top is mandatory. `Total entries = Reproduced bugs + 
 ## Edge cases
 
 - **Composition bugs**: a bug whose impact only manifests when combined with another bug. Classify on the combined impact, not on the individual bug's surface. Note the composition in Reasoning.
-- **Byzantine-only bugs**: in BFT systems, a bug exploitable only by a Byzantine node within the threat model is still High / Critical depending on impact. Honest-only failure modes typically rank lower.
+- **Security and abuse consequences** (tenant leak, revocation bypass, double redemption): flag them for the target project's `SECURITY.md` process in the findings summary, not as a public issue. A human decides where to send the report.
 - **Liveness vs safety**: a liveness violation (deadlock, livelock, starvation) under realistic load is at least High. A safety violation is at least High (often Critical).
 - **Documented design vs bug**: if Phase 4a set `FALSE POSITIVE`, use `—`; if Phase 4a kept it `REPRODUCED`, classify on its actual impact and let Reasoning note the disagreement.
 - **Entry count mismatch**: if `confirmed-bugs.md` has 8 `## Entry N:` headers, the output table must have 8 rows. Preserve the input identifiers; do not silently repair the Phase 4 report.
